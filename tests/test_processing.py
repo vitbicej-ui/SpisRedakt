@@ -140,17 +140,72 @@ class ProcessingTests(unittest.TestCase):
             doc.add_paragraph(line)
             doc.save(path)
             originals[path] = path.read_bytes()
-        for attempt in range(1, 3):
-            results = list(process_folders(source, destination))
-            self.assertEqual(len(results), 2)
-            for original, target, reason in results:
-                self.assertIsNotNone(target, reason)
-                self.assertEqual(target.parent, destination.resolve())
-                self.assertEqual(original.read_bytes(), originals[source / original.relative_to(source.resolve())])
-                self.assertIn("[OSOBA-1]", Document(target).paragraphs[0].text)
-            self.assertEqual(len(list(destination.iterdir())), attempt * 2)
+        results = list(process_folders(source, destination))
+        self.assertEqual(len(results), 2)
+        for original, target, reason in results:
+            self.assertIsNotNone(target, reason)
+            relative = original.relative_to(source.resolve())
+            self.assertEqual(target, destination.resolve() / relative.with_stem(relative.stem + "_anonymizovano"))
+            self.assertEqual(original.read_bytes(), originals[source / relative])
+            self.assertIn("[OSOBA-1]", Document(target).paragraphs[0].text)
+        self.assertTrue(all(target is None for _, target, _ in process_folders(source, destination)))
         with self.assertRaises(ValueError):
             list(process_folders(source, source / "nested"))
+
+    def test_word_keeps_formatting_and_redacts_across_runs(self):
+        from docx.shared import Pt
+        from anonymizer.office import redact_office
+
+        source = self.root / "styled.docx"
+        target = self.root / "redacted.docx"
+        doc = Document()
+        paragraph = doc.add_heading(level=2)
+        name = paragraph.add_run("Šárkou ")
+        name.font.name = "Cambria"
+        name.font.size = Pt(16)
+        name.bold = True
+        paragraph.add_run("Hrubou")
+        paragraph.add_run(" a důležitý text").italic = True
+        doc.add_table(rows=1, cols=1).cell(0, 0).text = "ŠÁRKA HRUBÁ"
+        doc.save(source)
+        redact_office(source, target, Rules())
+        result = Document(target)
+        paragraph = result.paragraphs[0]
+        self.assertEqual(paragraph.style.name, "Heading 2")
+        self.assertEqual(paragraph.text, "[OSOBA-1] a důležitý text")
+        self.assertEqual(paragraph.runs[0].font.name, "Cambria")
+        self.assertEqual(paragraph.runs[0].font.size, Pt(16))
+        self.assertTrue(paragraph.runs[0].bold)
+        self.assertTrue(paragraph.runs[2].italic)
+        self.assertEqual(result.tables[0].cell(0, 0).text, "[OSOBA-1]")
+
+    def test_spreadsheet_and_slide_keep_style_parts(self):
+        from anonymizer.office import DRAW, SHEET, redact_office
+
+        cases = [
+            (".xlsx", "xl/workbook.xml", "xl/worksheets/sheet1.xml", "xl/styles.xml",
+             f'<worksheet xmlns="{SHEET}"><sheetData><row><c r="A1" s="4" t="inlineStr"><is><r><rPr><b/></rPr><t>Šárka </t></r><r><t>Hrubá</t></r></is></c><c r="B1" s="2"><f>SUM(C1:C3)</f><v>12</v></c></row></sheetData></worksheet>',
+             ('s="4"', '<b', 'SUM(C1:C3)')),
+            (".pptx", "ppt/presentation.xml", "ppt/slides/slide1.xml", "ppt/theme/theme1.xml",
+             f'<slide xmlns:a="{DRAW}"><a:p><a:r><a:rPr b="1" i="1"/><a:t>Šárka Hrubá</a:t></a:r></a:p></slide>',
+             ('b="1"', 'i="1"')),
+        ]
+        for suffix, main, part, styles, xml, preserved in cases:
+            with self.subTest(suffix=suffix):
+                source = self.root / ("test" + suffix)
+                target = self.root / ("redacted" + suffix)
+                with ZipFile(source, "w") as archive:
+                    archive.writestr(main, "<root/>")
+                    archive.writestr(part, xml)
+                    archive.writestr(styles, '<styles><font name="Cambria"/></styles>')
+                redact_office(source, target, Rules())
+                with ZipFile(target) as archive:
+                    data = archive.read(part).decode()
+                    self.assertIn("[OSOBA-1]", data)
+                    self.assertNotIn("Hrubá", data)
+                    for marker in preserved:
+                        self.assertIn(marker, data)
+                    self.assertIn(b"Cambria", archive.read(styles))
 
 
 if __name__ == "__main__":

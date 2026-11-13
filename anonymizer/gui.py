@@ -20,8 +20,9 @@ class BatchWorker(QThread):
     def run(self):
         try:
             for source, target, error in process_folders(*self.arguments):
-                message = target.name if target else f"Chyba: {error}"
-                self.result.emit(f"{source.name} → {message}")
+                source_root, output_root, _ = self.arguments
+                message = str(target.relative_to(Path(output_root).resolve())) if target else f"Chyba: {error}"
+                self.result.emit(f"{source.relative_to(Path(source_root).resolve())} → {message}")
         except ValueError as error:
             self.result.emit(str(error))
         except Exception as error:
@@ -41,7 +42,7 @@ class Window(QWidget):
         self.input_button = QPushButton("1. Vybrat vstupní složku…")
         self.input_button.clicked.connect(self.choose_source)
         layout.addWidget(self.input_button)
-        self.source_label = QLabel("Vyberte složku s původními DOCX a PDF.")
+        self.source_label = QLabel("Vyberte složku s původními DOCX, XLSX, PPTX a PDF.")
         self.source_label.setWordWrap(True)
         layout.addWidget(self.source_label)
         self.output_button = QPushButton("2. Vybrat výstupní složku a zpracovat…")

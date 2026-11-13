@@ -3,8 +3,10 @@ import re
 from datetime import date
 
 SPACE = r"[ \t\n]+"
-CAP = r"[A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ][a-záčďéěíňóřšťúůýž]+"
-NAME = re.compile(rf"\b(?=(({CAP}){SPACE}({CAP})(?![\w-])))")
+UPPER = "A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ"
+CAP = rf"[{UPPER}][a-záčďéěíňóřšťúůýž]+"
+NAME_WORD = rf"(?:{CAP}|[{UPPER}]{{2,}})"
+NAME = re.compile(rf"\b(?=(({NAME_WORD}){SPACE}({NAME_WORD}(?:-{NAME_WORD})*)(?![\w-])))")
 TITLE = re.compile(r"(?:JUDr|MUDr|PhDr|Mgr|Ing|Bc|Dr)\.[ \t\n]*$", re.I)
 PERSON_CONTEXT = re.compile(r"\b(?:dědic\w*|účastník\w*|klient\w*|notář\w*|pan(?:a|em|u|í|ovi)?|svědk\w*|svědek|pozůstalost\w* po|zastoupen\w*|podepsal[ay]?)\s*:?\s+$", re.I)
 PERSON_AFTER = re.compile(r"\s*,?\s*(?:nar\.|narozen\w*|bytem\b|zemřel\w*\b|podepsal\w*\b)", re.I)
@@ -36,12 +38,21 @@ for row in (
     "Ivana Ivany Ivaně Ivanu Ivano Ivanou", "Jitka Jitky Jitce Jitku Jitko Jitkou",
     "Martina Martiny Martině Martinu Martino Martinou", "Markéta Markéty Markétě Markétu Markétou",
     "Eliška Elišky Elišce Elišku Eliško Eliškou", "Kristýna Kristýny Kristýně Kristýnu Kristýno Kristýnou",
+    "Matěj Matěje Matějovi Matěji Matějem", "Štěpán Štěpána Štěpánovi Štěpánu Štěpánem",
+    "Václava Václavy Václavě Václavu Václavo Václavou", "Jindřich Jindřicha Jindřichovi Jindřichu Jindřichem",
+    "Šárka Šárky Šárce Šárku Šárko Šárkou", "Zuzana Zuzany Zuzaně Zuzanu Zuzano Zuzanou",
+    "Monika Moniky Monice Moniku Moniko Monikou", "Simona Simony Simoně Simonu Simono Simonou",
+    "Michaela Michaely Michaele Michaelu Michaelo Michaelou",
+    "Dominik Dominika Dominikovi Dominiku Dominikem", "Dominika Dominiky Dominice Dominiku Dominikou",
+    "Mikuláš Mikuláše Mikulášovi Mikuláši Mikulášem", "Zbyněk Zbyňka Zbyňkovi Zbyňku Zbyňkem",
+    "Tobiáš Tobiáše Tobiášovi Tobiáši Tobiášem", "Patrik Patrika Patrikovi Patriku Patrikem",
 ):
     forms = row.casefold().split()
     for form in forms:
         GIVEN.setdefault(form, []).append(forms[0])
 
 FEMININE = set("anna jana eva petra marie lucie hana alena kateřina tereza veronika lenka barbora ivana jitka martina markéta eliška kristýna".split())
+FEMININE.update("václava šárka zuzana monika simona michaela dominika".split())
 
 
 def name_identity(first, last):
@@ -51,15 +62,22 @@ def name_identity(first, last):
         form in FEMININE for form in forms
     )
     canonical = next((form for form in forms if (form in FEMININE) == feminine), forms[0])
-    adjective = re.fullmatch(r"(.+(?:sk|ck|n))(?:ý|á|ého|ému|ém|ým|é|ou)", last)
+    surname = "-".join(surname_stem(part, feminine) for part in last.split("-"))
+    return f"{canonical} {surname}"
+
+
+def surname_stem(last, feminine):
+    adjective = re.fullmatch(r"(.+?)(?:ý|á|ého|ému|ém|ým|é|ou)", last)
     female = re.fullmatch(r"(.+ov)(?:á|é|ou|ými)", last)
     if female:
         last = female[1] + "á"
     elif adjective:
         last = adjective[1] + ("á" if feminine else "ý")
     elif not feminine:
+        # Keep stems stable across the common mobile-e and mobile-ě patterns.
         last = re.sub(r"(?<=[bcčdďfghjklmnňprřsštťvzž])(?:ovi|em|a|u|e|i)$", "", last)
-    return f"{canonical} {last}"
+        last = re.sub(r"(?<=[bcčdďfghjklmnňprřsštťvzž])[eě](?=[kl]$)", "", last)
+    return last
 
 
 CITY = rf"(?:{CAP})(?:{SPACE}(?:(?:nad|pod|u|na|ve|v|a){SPACE})?{CAP}){{0,3}}"

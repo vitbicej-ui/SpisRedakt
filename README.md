@@ -1,6 +1,6 @@
-# SpisRedakt 0.2.0
+# SpisRedakt 0.3.0
 
-Offline aplikace pro Windows pro dávkové zpracování DOCX a PDF. Vznikla nezávisle s funkční inspirací z [veřejného popisu SKRYI](https://www.skryi.cz/index.html). Licence projektu je AGPL-3.0-only.
+Offline aplikace pro Windows pro dávkové zpracování DOCX, XLSX, PPTX a PDF. Vznikla nezávisle s funkční inspirací z [veřejného popisu SKRYI](https://www.skryi.cz/index.html). Licence projektu je AGPL-3.0-only.
 
 ## Spuštění
 
@@ -18,15 +18,15 @@ Při spuštění ze zdrojů připravte česká data OCR skriptem `./scripts/get-
 
 ## Práce se spisem
 
-1. Vyberte vstupní složku s dokumenty jednoho spisu. Program zpracuje DOCX a PDF i v podsložkách. Ostatní formáty přeskočí.
-2. Vyberte samostatnou výstupní složku a tím spusťte dávku. Výsledky vzniknou přímo v ní pod neutrálními názvy. Protokol v okně spojuje vstupy s výstupy a uvádí chyby jednotlivých souborů. Originály zůstanou ve vstupní složce. Při opakování dávky se existující výstupy zachovají, proto pro novou dávku použijte prázdnou složku, chcete-li výsledky oddělit.
+1. Vyberte vstupní složku s dokumenty jednoho spisu. Program zpracuje DOCX, XLSX, PPTX a PDF i v podsložkách. Ostatní formáty přeskočí.
+2. Vyberte samostatnou výstupní složku a tím spusťte dávku. Název `Smlouva.docx` se změní na `Smlouva_anonymizovano.docx`. Struktura podsložek zůstává zachována. Originály i existující výstupy zůstanou beze změny. Název souboru může obsahovat osobní údaj, proto zkontrolujte také názvy před sdílením.
 3. Porovnejte každý výstup s originálem, včetně všech stran, příloh a významu ponechaného textu. Případné přehlédnuté údaje odstraňte před sdílením.
 
 ## Rozsah první verze
 
-- DOCX vytváří nový soubor z textu odstavců hlavního dokumentu, tabulek, hlaviček, patiček, poznámek pod čarou a vysvětlivek. Zahrnuje vložený text sledovaných změn a vypouští smazaný text. Ztrácí původní sazbu, strukturu tabulek, textová pole, obrázky, komentáře, metadata zdroje a přílohy. Výstup znovu prochází stejnými pravidly.
+- DOCX, XLSX a PPTX zachovávají strukturu odstavců, tabulek, buněk a snímků a jejich styly. Štítek převezme formát začátku nahrazeného textu. Délka štítku může ovlivnit zalomení nebo výšku řádků. Dokumenty s obrázky, grafy, přílohami, makry nebo externími odkazy se mohou odmítnout. Kontrolujte i skryté listy, názvy, vzorce a číselné buňky. Automatická pravidla pro strukturované datum nebo identifikátor v samostatné buňce podle nadpisu sloupce zatím chybí.
 - Pravidla hledají e-maily, české telefony, rodná čísla, označené bankovní účty a spisové značky, CZ IBAN, DIČ, označená IČO a doklady. Datum narození se rozpoznává podle slov v okolí, například `nar. dne` nebo `datum narození`. Data podpisu, jednání a úmrtí se ponechávají.
-- Jména hledá slovník tvarů běžných křestních jmen a právní kontext, například titul nebo formulace u data narození. Příjmení se sjednocují podle obvyklých koncovek. Adresy se hledají po slovech jako `bytem` a v běžných zápisech s obcí a číslem domu. Jde o pravidla s omezeným pokrytím. Neobvyklé tvary, iniciály, verzálky, složená jména, netypické adresy nebo OCR chyby mohou uniknout.
+- Jména hledá rozšířený slovník tvarů běžných křestních jmen a právní kontext. Zahrnuje běžné zápisy verzálkami a příjmení se spojovníkem. Příjmení se sjednocují podle koncovek a některých případů pohyblivého e. Adresy se hledají po slovech jako `bytem` a v běžných zápisech s obcí a číslem domu. Neobvyklé tvary, iniciály, netypické adresy nebo OCR chyby mohou uniknout.
 - DOCX používá stejné štítky pro shodné hodnoty a rozpoznané varianty v jedné dávce. Mapa je pouze v paměti. Stejnojmenné osoby se mohou sloučit a číslování se při změně dávky může změnit. PDF používá černé plochy bez štítků.
 - PDF znovu sestaví každou stránku z jednoho obrazu při 300 DPI. Detekce používá souřadnice znaků původního textu a podle obsahu stránky i české OCR nad vykresleným obrazem. Začernění mění samotné pixely před vložením obrazu. Původní textová vrstva, odkazy, metadata, anotace a souborové přílohy se nepřenášejí. Kontrola znovu otevře výstup, zkontroluje jeho strukturu a černé pixely v nalezených oblastech. Výstup není prohledávatelný a může být větší než vstup.
 - PDF s obrázky, vektorovou grafikou nebo bez čitelného textu vyžadují OCR. U prázdných nebo nečitelných stránek může zpracování souboru skončit chybou. Ručně ověřte zejména skeny, razítka, podpisy, fotografie, rukopis, grafiku, QR a čárové kódy. OCR neumí spolehlivě rozpoznat citlivý obsah v těchto prvcích. GUI zatím nenabízí ruční vyznačování ploch.
