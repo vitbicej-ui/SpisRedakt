@@ -13,6 +13,30 @@ from anonymizer.rules import Rules
 
 
 class ProcessingTests(unittest.TestCase):
+    def test_company_and_grouped_identifier(self):
+        output, _ = Rules().replace("Oprávněná: ZKUŠEBNÍ LEASING a.s., IČO 123 45 678")
+        self.assertEqual(output, "Oprávněná: [ORGANIZACE-1], IČO [ICO-1]")
+
+    def test_slovak_register_pdf_is_withheld(self):
+        source = self.root / "register.pdf"
+        with pdf.open() as document:
+            document.new_page().insert_text((60, 90), "Register trestov - synteticky formular")
+            document.save(source)
+        _, target, error = self.run_batch(source)[0]
+        self.assertIsNone(target)
+        self.assertIn("nebyl vydán", error)
+
+    def test_selected_batch_only_processes_ready_files(self):
+        source, output = self.root / "input", self.root / "output"
+        source.mkdir()
+        output.mkdir()
+        ready = source / "ready.txt"
+        ready.write_text(self.email, encoding="utf-8")
+        (source / "copying.txt").write_text(self.email, encoding="utf-8")
+        results = list(process_folders(source, output, selected=[ready.resolve()]))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][1].read_text(encoding="utf-8"), "[EMAIL-1]")
+
     def test_mixed_structured_formats_and_renamed_zip(self):
         source, target = self.root / "input", self.root / "output"
         source.mkdir()

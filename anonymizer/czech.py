@@ -100,6 +100,10 @@ def address_identity(value):
 
 
 def contextual_findings(text):
+    for match in COMPANY.finditer(text):
+        yield *match.span(1), "ORGANIZACE", match[1]
+    for match in SLOVAK_FIELD.finditer(text):
+        yield *match.span(1), "OSOBNI_UDAJ", match[1]
     for match in CASE.finditer(text):
         yield *match.span(1), "SPIS", match[1]
     for pattern in (BIRTH, BIRTH_TEXT):
@@ -126,3 +130,14 @@ def contextual_findings(text):
                 or PERSON_CONTEXT.search(before) or PERSON_AFTER.match(text, match.end(1))):
             end = match.end(1)
             yield *match.span(1), "OSOBA", name_identity(match[2], match[3])
+
+
+COMPANY = re.compile(
+    r"(?<!\w)([^\W\d_][\w&.'’ -]{0,100}?[ \t]+(?:a\.[ \t]*s\.|s\.[ \t]*r\.[ \t]*o\.|spol\.[ \t]*s[ \t]*r\.[ \t]*o\.))(?=[ \t]*[,;)]|[ \t]*$)",
+    re.I | re.M,
+)
+SLOVAK_FIELD = re.compile(
+    r"(?:^|[ \t])(?:meno|(?:rodné[ \t]+)?priezvisko|dátum narodenia|miesto narodenia|"
+    r"štát narodenia|štátne občianstvo|číslo dokladu|rodné číslo|pohlavie|číslo žiadosti|kód RT)"
+    r"[ \t]*:[ \t]*([^\n;]+?)(?=[ \t]{2,}\S|[ \t]*$|;)", re.I | re.M,
+)

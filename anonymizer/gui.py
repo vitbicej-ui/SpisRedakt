@@ -2,10 +2,11 @@ from pathlib import Path
 import sys
 import tempfile
 import os
+import hashlib
 
-from PySide6.QtCore import QThread, QTimer, Signal
+from PySide6.QtCore import QSettings, QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
+    QApplication, QFileDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
 from .batch import process_folders
@@ -13,10 +14,12 @@ from .batch import process_folders
 
 class BatchWorker(QThread):
     result = Signal(str)
+    handled = Signal(str)
 
-    def __init__(self, source, output, tessdata, parent):
+    def __init__(self, source, output, tessdata, parent, selected):
         super().__init__(parent)
         self.arguments = source, output, tessdata
+        self.selected = selected
 
     def run(self):
         try:
@@ -24,10 +27,18 @@ class BatchWorker(QThread):
             def audit_ready(path, fallback):
                 prefix = "Náhradní složka auditu" if fallback else "Audit dávky"
                 self.result.emit(f"{prefix}: {path}")
-            for source, target, error in process_folders(*self.arguments, audit_root=audit_root, audit_ready=audit_ready):
+            remaining = set(self.selected)
+            for source, target, error in process_folders(
+                *self.arguments, audit_root=audit_root, audit_ready=audit_ready, selected=self.selected
+            ):
                 source_root, output_root, _ = self.arguments
                 message = str(target.relative_to(Path(output_root).resolve())) if target else f"Chyba: {error}"
                 self.result.emit(f"{source.relative_to(Path(source_root).resolve())} → {message}")
+                remaining.discard(source)
+                self.handled.emit(str(source))
+            for source in sorted(remaining):
+                self.result.emit(f"{source.name} → přeskočeno")
+                self.handled.emit(str(source))
         except ValueError as error:
             self.result.emit(str(error))
         except Exception as error:
@@ -38,60 +49,144 @@ class Window(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("SpisRedakt")
-        self.resize(660, 470)
+        self.resize(760, 510)
         self.worker = None
-        self.source = None
+        self.settings = QSettings("SpisRedakt", "SpisRedakt")
+        self.source = self.settings.value("input", "", str)
+        self.output = self.settings.value("output", "", str)
+        self.observed = {}
+        self.handled = self.settings.value("handled", {}) or {}
+        self.pending = {}
         base = Path(sys.executable if getattr(sys, "frozen", False) else sys.argv[0]).resolve().parent
         self.tessdata = base / "tessdata"
+
+        self.setStyleSheet("""
+            QWidget { background: #f4f7fa; color: #192e42; font-size: 14px; }
+            QLabel#title { font-size: 29px; font-weight: 700; }
+            QLabel#status { color: #205b57; font-weight: 600; padding: 8px 0; }
+            QPushButton { background: #245b73; color: white; border: 0;
+                          border-radius: 6px; padding: 9px 15px; }
+            QPushButton:hover { background: #174457; }
+            QPushButton:disabled { background: #647886; }
+            QPlainTextEdit { background: white; border: 1px solid #cedae4;
+                             border-radius: 8px; padding: 8px; }
+        """)
         layout = QVBoxLayout(self)
-        self.input_button = QPushButton("1. Vybrat vstupní složku…")
-        self.input_button.clicked.connect(self.choose_source)
-        layout.addWidget(self.input_button)
-        self.source_label = QLabel("Vyberte složku s původními dokumenty, tabulkami, obrázky a archivy.")
-        self.source_label.setWordWrap(True)
-        layout.addWidget(self.source_label)
-        self.output_button = QPushButton("2. Vybrat výstupní složku a zpracovat…")
-        self.output_button.clicked.connect(self.run_batch)
-        self.output_button.setEnabled(False)
-        layout.addWidget(self.output_button)
-        self.status = QLabel("Výstupy před sdílením porovnejte s originály.")
+        layout.setContentsMargins(24, 20, 24, 22)
+        layout.setSpacing(12)
+        title = QLabel("SpisRedakt")
+        title.setObjectName("title")
+        layout.addWidget(title)
+        layout.addWidget(QLabel("Automatické zpracování dokumentů"))
+        self.buttons = []
+        self.paths = {}
+        for setting, title in (("source", "Vstupní složka"), ("output", "Výstupní složka")):
+            row = QHBoxLayout()
+            label = QLabel()
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            label.setWordWrap(True)
+            self.paths[setting] = label
+            button = QPushButton("Vybrat složku")
+            button.clicked.connect(lambda checked=False, key=setting, name=title: self.choose(key, name))
+            row.addWidget(label, 1)
+            row.addWidget(button)
+            layout.addLayout(row)
+            self.buttons.append(button)
+        self.status = QLabel()
+        self.status.setObjectName("status")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
+        retry = QPushButton("Zpracovat složku znovu")
+        retry.clicked.connect(self.retry)
+        self.buttons.append(retry)
+        layout.addWidget(retry)
         self.log = QPlainTextEdit(readOnly=True)
-        layout.addWidget(self.log)
+        self.log.document().setMaximumBlockCount(500)
+        layout.addWidget(self.log, 1)
+        self.refresh_paths()
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.scan)
+        self.timer.start(2500)
 
-    def choose_source(self):
-        source = QFileDialog.getExistingDirectory(self, "Vstupní složka")
-        if source:
-            self.source = source
-            self.source_label.setText(source)
-            self.output_button.setEnabled(True)
+    def refresh_paths(self):
+        for key, name in (("source", "Vstup"), ("output", "Výstup")):
+            self.paths[key].setText(f"{name}  ·  {getattr(self, key) or 'Vyberte složku'}")
+        self.status.setText("Sledování je zapnuté, dokud je aplikace otevřená."
+                            if self.source and self.output else "Nejdřív nastavte obě složky.")
 
-    def run_batch(self):
-        output = QFileDialog.getExistingDirectory(self, "Výstupní složka")
-        if not output:
+    def choose(self, key, title):
+        path = QFileDialog.getExistingDirectory(self, title, getattr(self, key))
+        if path:
+            setattr(self, key, path)
+            self.settings.setValue("input" if key == "source" else "output", path)
+            self.observed.clear()
+            self.refresh_paths()
+
+    def retry(self):
+        if self.source and self.output:
+            self.handled.clear()
+            self.settings.setValue("handled", self.handled)
+            self.scan()
+
+    def scan(self):
+        if self.worker or not self.source or not self.output:
             return
-        self.log.clear()
-        self.input_button.setEnabled(False)
-        self.output_button.setEnabled(False)
-        self.status.setText(f"Zpracovávám dávku do {output}")
-        self.worker = BatchWorker(self.source, output, self.tessdata, self)
+        try:
+            source, output = (Path(path).resolve(strict=True) for path in (self.source, self.output))
+            if not source.is_dir() or not output.is_dir() or source.is_relative_to(output) or output.is_relative_to(source):
+                self.status.setText("Vyberte dvě oddělené složky.")
+                return
+            current = {}
+            pending = {}
+            for path in source.rglob("*"):
+                if path.name.startswith("~$") or path.is_symlink() or not path.is_file():
+                    continue
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                key = hashlib.sha256(os.fsencode(str(output) + "\0" + str(path))).hexdigest()
+                signature = f"{stat.st_size}:{stat.st_mtime_ns}"
+                current[key] = signature
+                if self.observed.get(key) == signature and self.handled.get(key) != signature:
+                    pending[path] = (key, signature)
+            self.observed = current
+        except OSError:
+            self.status.setText("Některá složka je nedostupná. Sledování se obnoví po jejím připojení.")
+            return
+        if not pending:
+            self.refresh_paths()
+            return
+        self.pending = pending
+        for button in self.buttons:
+            button.setEnabled(False)
+        self.status.setText(f"Zpracovávám soubory: {len(pending)}")
+        self.worker = BatchWorker(str(source), str(output), self.tessdata, self, list(pending))
         self.worker.result.connect(self.log.appendPlainText)
+        self.worker.handled.connect(self.mark_handled)
         self.worker.finished.connect(self.finished)
         self.worker.start()
 
+    def mark_handled(self, source):
+        key, signature = self.pending[Path(source)]
+        self.handled[key] = signature
+        self.settings.setValue("handled", self.handled)
+        self.settings.sync()
+
     def finished(self):
-        self.input_button.setEnabled(True)
-        self.output_button.setEnabled(True)
-        self.status.setText("Zpracování skončilo. Zkontrolujte stav souborů a obsah výstupů.")
+        for button in self.buttons:
+            button.setEnabled(True)
         self.worker.deleteLater()
         self.worker = None
+        self.refresh_paths()
 
     def closeEvent(self, event):
         if self.worker is not None:
+            self.status.setText("Probíhá zpracování. Okno lze zavřít po dokončení dávky.")
             event.ignore()
         else:
             super().closeEvent(event)
+
 
 
 def main():
@@ -99,6 +194,7 @@ def main():
     window = Window()
     window.show()
     if "--smoke-test" in sys.argv:
+        window.timer.stop()
         if getattr(sys, "frozen", False):
             smoke_test_package(window.tessdata)
         QTimer.singleShot(0, app.quit)

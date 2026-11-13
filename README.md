@@ -1,4 +1,4 @@
-# SpisRedakt 0.5.0
+# SpisRedakt 0.6.0
 
 Offline aplikace pro Windows pro dávkové zpracování DOCX, XLSX, PPTX a PDF. Vznikla nezávisle s funkční inspirací z [veřejného popisu SKRYI](https://www.skryi.cz/index.html). Licence projektu je AGPL-3.0-only.
 
@@ -17,6 +17,10 @@ python -m venv .venv
 Při spuštění ze zdrojů připravte česká data OCR skriptem `./scripts/get-ocr.ps1`. Vytvoří složku `tessdata` vedle `start.py`. Pokud OCR nedokáže otevřít cestu s diakritikou, rozbalte celou aplikaci do složky s cestou bez diakritiky, například `C:\SpisRedakt`.
 
 ## Práce se spisem
+
+Aplikace si pamatuje obě složky. Dokud je otevřená, sleduje nové a změněné soubory a čeká na dvě shodné kontroly velikosti a času změny. Stejný soubor pro stejný výstup automaticky neopakuje ani po restartu. Tlačítko „Zpracovat složku znovu“ umožní zopakovat dávku. Soubory zachycené v různých dávkách mohou dostat odlišné pseudonymy.
+
+Pokud aplikace rozpozná slovenský výpis z rejstříku trestů nebo osobní formulář v PDF, výstup nevydá. Rozpoznání formuláře závisí na čitelnosti textu a OCR. Neúplnou redakci ze starších verzí nepoužívejte pro sdílení.
 
 1. Vyberte vstupní složku s dokumenty jednoho spisu. Program zpracuje DOCX, XLSX, PPTX a PDF i v podsložkách. Ostatní formáty přeskočí.
 2. Vyberte samostatnou výstupní složku a tím spusťte dávku. Název `Smlouva.docx` se změní na `Smlouva_anonymizovano.docx`. Struktura podsložek zůstává zachována. Originály i existující výstupy zůstanou beze změny. Název souboru může obsahovat osobní údaj, proto zkontrolujte také názvy před sdílením.

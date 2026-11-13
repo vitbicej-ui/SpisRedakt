@@ -2,6 +2,7 @@ from pathlib import Path
 import ctypes
 import os
 import re
+import unicodedata
 import xml.etree.ElementTree as ET
 from zipfile import ZipFile
 
@@ -147,6 +148,12 @@ def redact_pdf(source, destination, rules, tessdata=None, force_ocr=False):
                 if not recognized[0].strip():
                     raise ValueError("OCR nenašlo čitelný text. Stránku zkontrolujte ručně.")
                 sources.append(recognized)
+            combined = " ".join(content for content, _, _ in sources)
+            folded = "".join(c for c in unicodedata.normalize("NFD", combined.casefold())
+                             if not unicodedata.combining(c))
+            if (re.search(r"regist(?:er|r[aeiu]?)\s+trestov", folded)
+                    or ("priezvisko" in folded and re.search(r"narodenia|ziadatel", folded))):
+                raise ValueError("Slovenský výpis nebo formulář nebyl vydán: rozložení osobních polí zatím nelze spolehlivě ověřit.")
             redacted = []
             for content, geometry, transform in sources:
                 redacted.extend(redact_geometry(pixmap, rules, content, geometry, transform))

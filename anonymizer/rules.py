@@ -17,7 +17,7 @@ RULES = {
     "UCET": r"(?:účet|účtu|bankovní spojení|č\.[ \t]*ú\.)[ \t]*:?[ \t]*((?:\d{1,6}-)?\d{2,10}/\d{4})(?!\d)",
     "DIC": r"\bCZ\d{8,10}\b",
     "DOKLAD": r"(?:(?:OP|pas|doklad)[ \t]*(?:č\.[ \t]*)?:[ \t]*)([A-Z0-9]{6,12})\b",
-    "ICO": r"(?:IČO?[ \t]*:[ \t]*)(\d{8})\b",
+    "ICO": r"(?<!\w)IČO?[ \t]*:?[ \t]*((?:\d[ \t\u00a0]?){7}\d)(?![ \t\u00a0]?\d)",
 }
 COMPILED = {kind: re.compile(pattern, re.IGNORECASE) for kind, pattern in RULES.items()}
 

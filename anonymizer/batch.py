@@ -8,26 +8,26 @@ from .rules import Rules
 from .audit import Audit
 
 
-def process_folders(input_root, output_root, tessdata=None, audit_root=None, audit_ready=None):
+def process_folders(input_root, output_root, tessdata=None, audit_root=None, audit_ready=None, selected=None):
     audit = Audit(audit_root) if audit_root is not None else None
     completed = False
     try:
         if audit and audit_ready:
             audit.on_fallback = audit_ready
             audit_ready(audit.path, audit.fallback)
-        yield from _process_folders(input_root, output_root, tessdata, audit)
+        yield from _process_folders(input_root, output_root, tessdata, audit, selected)
         completed = True
     finally:
         if audit:
             audit.finish(completed)
 
 
-def _process_folders(input_root, output_root, tessdata, audit):
+def _process_folders(input_root, output_root, tessdata, audit, selected):
     source_root = Path(input_root).resolve(strict=True)
     target_root = Path(output_root).resolve(strict=True)
     if source_root == target_root or source_root in target_root.parents or target_root in source_root.parents:
         raise ValueError("Vstupní a výstupní složka musí být oddělené.")
-    sources = sorted(path for path in source_root.rglob("*")
+    sources = sorted(path for path in (source_root.rglob("*") if selected is None else selected)
                      if path.is_file() and not path.name.startswith("~$")
                      and path.resolve().is_relative_to(source_root))
     if not sources:
