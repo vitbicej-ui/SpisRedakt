@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 import tempfile
+import os
 
 from PySide6.QtCore import QThread, QTimer, Signal
 from PySide6.QtWidgets import (
@@ -19,7 +20,11 @@ class BatchWorker(QThread):
 
     def run(self):
         try:
-            for source, target, error in process_folders(*self.arguments):
+            audit_root = os.environ.get("SPISREDAKT_AUDIT_DIR") or Path(sys.argv[0]).resolve().parent / "audit"
+            def audit_ready(path, fallback):
+                prefix = "Náhradní složka auditu" if fallback else "Audit dávky"
+                self.result.emit(f"{prefix}: {path}")
+            for source, target, error in process_folders(*self.arguments, audit_root=audit_root, audit_ready=audit_ready):
                 source_root, output_root, _ = self.arguments
                 message = str(target.relative_to(Path(output_root).resolve())) if target else f"Chyba: {error}"
                 self.result.emit(f"{source.relative_to(Path(source_root).resolve())} → {message}")

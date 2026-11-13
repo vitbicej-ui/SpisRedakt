@@ -148,7 +148,18 @@ class ProcessingTests(unittest.TestCase):
             self.assertEqual(target, destination.resolve() / relative.with_stem(relative.stem + "_anonymizovano"))
             self.assertEqual(original.read_bytes(), originals[source / relative])
             self.assertIn("[OSOBA-1]", Document(target).paragraphs[0].text)
-        self.assertTrue(all(target is None for _, target, _ in process_folders(source, destination)))
+        import json
+        audit_root = self.root / "audit"
+        repeated = list(process_folders(source, destination, audit_root=audit_root))
+        for _, target, reason in repeated:
+            self.assertIsNotNone(target, reason)
+            self.assertTrue(target.name.endswith("_anonymizovano_2.docx"))
+        log = next(audit_root.glob("*/events.jsonl")).read_text(encoding="utf-8")
+        self.assertNotIn("a.docx", log)
+        self.assertNotIn("Hradil", log)
+        events = [json.loads(line) for line in log.splitlines()]
+        self.assertEqual(events[-1]["counts"], {"released": 2, "skipped": 1})
+        self.assertEqual(sum(event.get("fallback") == "numbered_filename" for event in events), 2)
         with self.assertRaises(ValueError):
             list(process_folders(source, source / "nested"))
 
@@ -249,6 +260,49 @@ class ProcessingTests(unittest.TestCase):
             self.assertGreater(colors.get(b"\xff\xff\xff", 0), 10_000)
             text, _, _ = recognize_image(pixmap, os.environ["SPISREDAKT_TEST_TESSDATA"])
             self.assertNotIn(self.email, text)
+
+    @unittest.skipUnless(os.environ.get("SPISREDAKT_TEST_TESSDATA"), "Chybí testovací jazyková data.")
+    def test_bmp_ocr_and_mixed_audit(self):
+        import json
+        from io import BytesIO
+        from PySide6.QtCore import QBuffer, QIODevice
+        from PySide6.QtGui import QImage
+
+        source, output, audit = (self.root / part for part in ("input", "output", "audit"))
+        source.mkdir()
+        output.mkdir()
+        with pdf.open() as sample:
+            page = sample.new_page(width=430, height=90)
+            page.insert_text((40, 50), self.email, fontsize=22)
+            image = QImage.fromData(page.get_pixmap(dpi=240).tobytes("png"))
+        buffer = QBuffer()
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        self.assertTrue(image.save(buffer, "BMP"))
+        doc = Document()
+        doc.add_picture(BytesIO(bytes(buffer.data())))
+        doc.save(source / "private-name.docx")
+        (source / "broken.docx").write_bytes(b"invalid")
+        (source / "unknown.bin").write_bytes(b"unknown")
+        results = list(process_folders(source, output, os.environ["SPISREDAKT_TEST_TESSDATA"], audit))
+        self.assertEqual(sum(target is not None for _, target, _ in results), 1, results)
+        target = next(target for _, target, _ in results if target)
+        with ZipFile(target) as archive:
+            bitmap = QImage.fromData(archive.read("word/media/image1.bmp"))
+            self.assertFalse(bitmap.isNull())
+            png = QBuffer()
+            png.open(QIODevice.OpenModeFlag.WriteOnly)
+            self.assertTrue(bitmap.save(png, "PNG"))
+            pixels = pdf.Pixmap(bytes(png.data()))
+            colors = pixels.color_count(colors=True)
+            self.assertGreater(colors.get(bytes(3), 0), 7_000)
+            self.assertGreater(colors.get(bytes([255, 255, 255]), 0), 10_000)
+            text, _, _ = recognize_image(pixels, os.environ["SPISREDAKT_TEST_TESSDATA"])
+            self.assertNotIn(self.email, text)
+        log = next(audit.glob("*/events.jsonl")).read_text(encoding="utf-8")
+        self.assertNotIn("private-name", log)
+        self.assertNotIn(self.email, log)
+        self.assertEqual(json.loads(log.splitlines()[-1])["counts"],
+                         {"released": 1, "failed": 1, "skipped": 1})
 
 
 if __name__ == "__main__":

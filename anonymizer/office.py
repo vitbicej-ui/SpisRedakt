@@ -17,7 +17,7 @@ BLOCKS = {
     ".pptx": (DRAW, "p"),
 }
 UNSUPPORTED = re.compile(r"(?:^|/)(?:embeddings|activeX|externalLinks|pivotCache|queryTables|threadedComments|diagrams|_xmlsignatures)(?:/|$)|vbaProject", re.I)
-MEDIA = re.compile(r"^(?:word|xl|ppt)/media/[^/]+\.(png|jpe?g)$", re.I)
+MEDIA = re.compile(r"^(?:word|xl|ppt)/media/[^/]+\.(png|jpe?g|bmp)$", re.I)
 DISABLED_LINK = "https://example.invalid/"
 
 
@@ -80,6 +80,24 @@ def office_blocks(root, suffix):
 
 
 def redact_image(data, extension, rules, tessdata):
+    if extension == "bmp":
+        from PySide6.QtCore import QBuffer, QIODevice
+        from PySide6.QtGui import QImage
+
+        bitmap = QImage.fromData(data, "BMP")
+        if bitmap.isNull() or bitmap.width() * bitmap.height() > MAX_PIXELS:
+            raise ValueError("Vložený BMP je poškozený nebo příliš velký.")
+        buffer = QBuffer()
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        if not bitmap.save(buffer, "PNG"):
+            raise ValueError("Vložený BMP nelze převést pro OCR.")
+        redacted = redact_image(bytes(buffer.data()), "png", rules, tessdata)
+        buffer.close()
+        buffer.setData(b"")
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        if not QImage.fromData(redacted, "PNG").save(buffer, "BMP"):
+            raise ValueError("Anonymizovaný BMP nelze uložit.")
+        return bytes(buffer.data())
     with pdf.open(stream=data, filetype=extension) as image:
         if image.page_count != 1:
             raise ValueError("Vložený obrázek má více snímků.")
@@ -123,7 +141,7 @@ def redact_office(source, destination, rules, tessdata=None):
             if media:
                 data = redact_image(data, media[1].lower(), rules, tessdata)
             elif "/media/" in name:
-                raise ValueError("Vložený obrázek má nepodporovaný formát. Použijte PNG nebo JPEG.")
+                raise ValueError("Vložený obrázek má nepodporovaný formát.")
             elif name.endswith((".xml", ".rels", ".vml")):
                 parser = etree.XMLParser(resolve_entities=False, no_network=True)
                 root = etree.fromstring(data, parser=parser)
