@@ -6,7 +6,10 @@ from zipfile import ZipFile, ZIP_DEFLATED
 
 from lxml import etree
 
+import re
+
 from .documents import redact_pdf
+from .forms import FormError
 from .office import BLOCKS, redact_office, redact_image
 
 TEXT = {".txt", ".csv", ".tsv", ".json", ".xml"}
@@ -15,10 +18,32 @@ SUPPORTED = TEXT | IMAGES | BLOCKS.keys() | {".pdf", ".zip"}
 MAX_BYTES = 40_000_000
 
 
-class FormatError(ValueError):
-    def __init__(self, code, message):
-        self.code = code
-        super().__init__(message)
+FormatError = FormError      # one coded error type for every withheld or failed file
+BLOCK_TAGS = {"p", "si", "is", "t", "v", "oddHeader", "oddFooter", "evenHeader", "evenFooter",
+              "firstHeader", "firstFooter"}
+
+
+def verify_office(destination, rules):
+    """Independent re-read of the written package: every part, every text, raw bytes too."""
+    parser = etree.XMLParser(resolve_entities=False, no_network=True)
+    with ZipFile(destination) as archive:
+        if archive.testzip() is not None:
+            raise FormatError("corrupt_output", "Výstup Office nelze přečíst.")
+        for name in archive.namelist():
+            data = archive.read(name)
+            if "/media/" in name:
+                continue                    # images were re-read by OCR when redacted
+            if name.endswith((".xml", ".rels", ".vml")):
+                root = etree.fromstring(data, parser=parser)
+                for node in root.iter():
+                    if isinstance(node.tag, str) and etree.QName(node).localname in BLOCK_TAGS:
+                        if rules.find("".join(node.itertext())):
+                            raise FormatError("residual_data", "Kontrola výstupu Office našla zbývající údaj.")
+                texts = [re.sub(r"(?:<[^>]*>)+", "\n\n", data.decode("utf-8", "ignore"))]
+            else:
+                texts = [data.decode("utf-8", "ignore"), data.decode("utf-16-le", "ignore")]
+            if any(rules.find(text, generic=False) for text in texts):
+                raise FormatError("residual_data", "Kontrola výstupu Office našla zbývající údaj v části balíčku.")
 
 
 def identify(data, suffix):
@@ -135,14 +160,14 @@ def redact_archive(data, rules, depth=0, budget=None):
     return output.getvalue()
 
 
-def redact_file(source, destination, suffix, rules, tessdata):
+def redact_file(source, destination, suffix, rules, tessdata, report=None):
+    report = {} if report is None else report
     if suffix == ".pdf":
-        redact_pdf(source, destination, rules, tessdata)
+        redact_pdf(source, destination, rules, tessdata, report=report)
     elif suffix in BLOCKS:
         redact_office(source, destination, rules, tessdata)
-        with ZipFile(destination) as archive:
-            if archive.testzip() is not None:
-                raise FormatError("corrupt_output", "Výstup Office nelze přečíst.")
+        verify_office(destination, rules)
+        report.update(output_reread="package")
     else:
         data = source.read_bytes()
         if suffix in TEXT:

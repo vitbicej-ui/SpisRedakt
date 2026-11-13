@@ -26,6 +26,17 @@ class ProcessingTests(unittest.TestCase):
         self.assertIsNone(target)
         self.assertIn("nebyl vydán", error)
 
+    def test_slovak_form_without_title_is_withheld(self):
+        source = self.root / "form.pdf"
+        with pdf.open() as document:
+            page = document.new_page()
+            page.insert_text((60, 90), "Statne obcianstvo: Fiktivny stat")
+            page.insert_text((300, 90), "Cislo dokladu: ZZ123456")
+            document.save(source)
+        _, target, error = self.run_batch(source)[0]
+        self.assertIsNone(target)
+        self.assertIn("nebyl vydán", error)
+
     def test_selected_batch_only_processes_ready_files(self):
         source, output = self.root / "input", self.root / "output"
         source.mkdir()

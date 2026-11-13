@@ -2,7 +2,6 @@ from pathlib import Path
 import sys
 import tempfile
 import os
-import hashlib
 
 from PySide6.QtCore import QSettings, QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
@@ -10,11 +9,12 @@ from PySide6.QtWidgets import (
 )
 
 from .batch import process_folders
+from .watch import Watcher
 
 
 class BatchWorker(QThread):
     result = Signal(str)
-    handled = Signal(str)
+    handled = Signal(str, str)
 
     def __init__(self, source, output, tessdata, parent, selected):
         super().__init__(parent)
@@ -23,7 +23,7 @@ class BatchWorker(QThread):
 
     def run(self):
         try:
-            audit_root = os.environ.get("SPISREDAKT_AUDIT_DIR") or Path(sys.argv[0]).resolve().parent / "audit"
+            audit_root = os.environ.get("SPISREDAKT_AUDIT_DIR") or application_folder() / "audit"
             def audit_ready(path, fallback):
                 prefix = "Náhradní složka auditu" if fallback else "Audit dávky"
                 self.result.emit(f"{prefix}: {path}")
@@ -35,14 +35,34 @@ class BatchWorker(QThread):
                 message = str(target.relative_to(Path(output_root).resolve())) if target else f"Chyba: {error}"
                 self.result.emit(f"{source.relative_to(Path(source_root).resolve())} → {message}")
                 remaining.discard(source)
-                self.handled.emit(str(source))
+                self.handled.emit(str(source), "" if target else error)
             for source in sorted(remaining):
                 self.result.emit(f"{source.name} → přeskočeno")
-                self.handled.emit(str(source))
+                self.handled.emit(str(source), "")
         except ValueError as error:
             self.result.emit(str(error))
         except Exception as error:
             self.result.emit(type(error).__name__)
+
+
+def application_folder():
+    return Path(sys.executable if getattr(sys, "frozen", False) else sys.argv[0]).resolve().parent
+
+
+def default_tessdata():
+    return Path(os.environ.get("SPISREDAKT_TESSDATA") or application_folder() / "tessdata")
+
+
+def run_once(source, output):
+    """Process a folder once without the window: `SpisRedakt --once <input> <output>`.
+    Exit code 0 when the batch ran to its end (individual files may still be withheld)."""
+    audit_root = os.environ.get("SPISREDAKT_AUDIT_DIR") or application_folder() / "audit"
+    try:
+        for _ in process_folders(source, output, default_tessdata(), audit_root=audit_root):
+            pass
+    except ValueError:
+        return 2
+    return 0
 
 
 class Window(QWidget):
@@ -51,14 +71,14 @@ class Window(QWidget):
         self.setWindowTitle("SpisRedakt")
         self.resize(760, 510)
         self.worker = None
-        self.settings = QSettings("SpisRedakt", "SpisRedakt")
+        override = os.environ.get("SPISREDAKT_SETTINGS")      # isolated settings file for tests
+        self.settings = (QSettings(override, QSettings.Format.IniFormat) if override
+                         else QSettings("SpisRedakt", "SpisRedakt"))
         self.source = self.settings.value("input", "", str)
         self.output = self.settings.value("output", "", str)
-        self.observed = {}
-        self.handled = self.settings.value("handled", {}) or {}
+        self.watcher = Watcher(self.settings.value("handled", {}) or {})
         self.pending = {}
-        base = Path(sys.executable if getattr(sys, "frozen", False) else sys.argv[0]).resolve().parent
-        self.tessdata = base / "tessdata"
+        self.tessdata = default_tessdata()
 
         self.setStyleSheet("""
             QWidget { background: #f4f7fa; color: #192e42; font-size: 14px; }
@@ -119,13 +139,13 @@ class Window(QWidget):
         if path:
             setattr(self, key, path)
             self.settings.setValue("input" if key == "source" else "output", path)
-            self.observed.clear()
+            self.watcher.forget_observations()
             self.refresh_paths()
 
     def retry(self):
         if self.source and self.output:
-            self.handled.clear()
-            self.settings.setValue("handled", self.handled)
+            self.watcher.reset()
+            self.settings.setValue("handled", self.watcher.handled)
             self.scan()
 
     def scan(self):
@@ -133,24 +153,10 @@ class Window(QWidget):
             return
         try:
             source, output = (Path(path).resolve(strict=True) for path in (self.source, self.output))
-            if not source.is_dir() or not output.is_dir() or source.is_relative_to(output) or output.is_relative_to(source):
-                self.status.setText("Vyberte dvě oddělené složky.")
-                return
-            current = {}
-            pending = {}
-            for path in source.rglob("*"):
-                if path.name.startswith("~$") or path.is_symlink() or not path.is_file():
-                    continue
-                try:
-                    stat = path.stat()
-                except OSError:
-                    continue
-                key = hashlib.sha256(os.fsencode(str(output) + "\0" + str(path))).hexdigest()
-                signature = f"{stat.st_size}:{stat.st_mtime_ns}"
-                current[key] = signature
-                if self.observed.get(key) == signature and self.handled.get(key) != signature:
-                    pending[path] = (key, signature)
-            self.observed = current
+            pending = self.watcher.scan(source, output)
+        except ValueError as error:
+            self.status.setText(str(error))
+            return
         except OSError:
             self.status.setText("Některá složka je nedostupná. Sledování se obnoví po jejím připojení.")
             return
@@ -167,11 +173,11 @@ class Window(QWidget):
         self.worker.finished.connect(self.finished)
         self.worker.start()
 
-    def mark_handled(self, source):
+    def mark_handled(self, source, error):
         key, signature = self.pending[Path(source)]
-        self.handled[key] = signature
-        self.settings.setValue("handled", self.handled)
-        self.settings.sync()
+        if self.watcher.result(key, signature, error):
+            self.settings.setValue("handled", self.watcher.handled)
+            self.settings.sync()
 
     def finished(self):
         for button in self.buttons:
@@ -191,6 +197,11 @@ class Window(QWidget):
 
 def main():
     app = QApplication(sys.argv)
+    if "--once" in sys.argv:
+        position = sys.argv.index("--once")
+        if len(sys.argv) < position + 3:
+            return 2
+        return run_once(sys.argv[position + 1], sys.argv[position + 2])
     window = Window()
     window.show()
     if "--smoke-test" in sys.argv:

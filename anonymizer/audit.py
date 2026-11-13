@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from collections import Counter
 
-VERSION = "0.6.0"
+VERSION = "0.7.0.dev0"
 
 
 class Audit:
@@ -45,9 +45,9 @@ class Audit:
             self.append(line)
             if self.on_fallback:
                 self.on_fallback(self.path, True)
-        if status in {"released", "failed", "skipped"}:
+        if status in {"released", "failed", "skipped", "withheld"}:
             self.counts[status] += 1
-        if status == "failed":
+        if status in {"failed", "withheld"}:
             self.errors[fields["code"]] += 1
 
     def append(self, line):
@@ -60,7 +60,7 @@ class Audit:
         self.record("completed" if completed else "interrupted", phase="batch",
                     counts=self.counts, errors=self.errors)
         summary = "\n".join(f"{label}: {self.counts[key]}" for key, label in
-                            (("released", "Vydáno"), ("failed", "Chyby"), ("skipped", "Přeskočeno")))
+                            (("released", "Vydáno"), ("withheld", "Zadrženo (neověřitelné)"), ("failed", "Chyby"), ("skipped", "Přeskočeno")))
         (self.path / "souhrn.txt").write_text(
             f"SpisRedakt {VERSION} · {self.id}\n"
             + ("Dávka dokončena.\n" if completed else "Dávka přerušena.\n") + summary + "\n"
