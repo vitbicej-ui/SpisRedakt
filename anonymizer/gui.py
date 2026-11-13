@@ -2,109 +2,82 @@ from pathlib import Path
 import sys
 import tempfile
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, QTimer, Signal
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QFileDialog, QLabel, QListWidget, QMessageBox,
-    QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
+    QApplication, QFileDialog, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
-from .batch import process_batch
+from .batch import process_folders
 
 
 class BatchWorker(QThread):
-    result = Signal(int, str)
-    failed = Signal(str)
+    result = Signal(str)
 
-    def __init__(self, sources, output, aliases, tessdata, force_ocr, parent):
+    def __init__(self, source, output, tessdata, parent):
         super().__init__(parent)
-        self.arguments = sources, output, aliases, tessdata, force_ocr
+        self.arguments = source, output, tessdata
 
     def run(self):
         try:
-            for index, (_, target, reason) in enumerate(process_batch(*self.arguments), 1):
-                message = f"Ke kontrole: {target.parent.name}/{target.name}" if target else f"Chyba: {reason}"
-                self.result.emit(index, message)
+            for source, target, error in process_folders(*self.arguments):
+                message = target.name if target else f"Chyba: {error}"
+                self.result.emit(f"{source.name} → {message}")
         except ValueError as error:
-            self.failed.emit(str(error))
+            self.result.emit(str(error))
         except Exception as error:
-            self.failed.emit(type(error).__name__)
+            self.result.emit(type(error).__name__)
 
 
 class Window(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("SpisRedakt")
-        self.resize(690, 620)
-        self.sources = []
+        self.resize(660, 470)
         self.worker = None
+        self.source = None
         base = Path(sys.executable if getattr(sys, "frozen", False) else sys.argv[0]).resolve().parent
-        bundled = base / "tessdata"
-        self.tessdata = bundled if (bundled / "ces.traineddata").is_file() else None
+        self.tessdata = base / "tessdata"
         layout = QVBoxLayout(self)
-        self.select = QPushButton("Vybrat dokumenty DOCX a PDF…")
-        self.select.clicked.connect(self.choose_sources)
-        layout.addWidget(self.select)
-        self.files = QListWidget()
-        layout.addWidget(self.files)
-        layout.addWidget(QLabel("Vlastní výrazy, jeden údaj na řádek. Tvary téže osoby oddělte znakem |."))
-        self.aliases = QPlainTextEdit()
-        self.aliases.setPlaceholderText("Např. Testovací Osoba | Testovací Osoby")
-        self.aliases.setMaximumHeight(100)
-        layout.addWidget(self.aliases)
-        self.ocr = QPushButton("Vybrat složku s ces.traineddata…")
-        self.ocr.clicked.connect(self.choose_ocr)
-        layout.addWidget(self.ocr)
-        self.ocr_status = QLabel("Čeština pro OCR je k dispozici." if self.tessdata else "Čeština pro OCR zatím není nastavena.")
-        layout.addWidget(self.ocr_status)
-        self.force_ocr = QCheckBox("Spustit OCR na všech stránkách PDF")
-        layout.addWidget(self.force_ocr)
-        self.start = QPushButton("Vybrat výstupní složku a zpracovat…")
-        self.start.clicked.connect(self.run_batch)
-        layout.addWidget(self.start)
-        self.status = QLabel("Výstupy před sdílením porovnejte s originály. Dávka může některé údaje přehlédnout.")
+        self.input_button = QPushButton("1. Vybrat vstupní složku…")
+        self.input_button.clicked.connect(self.choose_source)
+        layout.addWidget(self.input_button)
+        self.source_label = QLabel("Vyberte složku s původními DOCX a PDF.")
+        self.source_label.setWordWrap(True)
+        layout.addWidget(self.source_label)
+        self.output_button = QPushButton("2. Vybrat výstupní složku a zpracovat…")
+        self.output_button.clicked.connect(self.run_batch)
+        self.output_button.setEnabled(False)
+        layout.addWidget(self.output_button)
+        self.status = QLabel("Výstupy před sdílením porovnejte s originály.")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.log = QPlainTextEdit(readOnly=True)
         layout.addWidget(self.log)
-        self.controls = [self.select, self.aliases, self.ocr, self.force_ocr, self.start]
-        self.start.setEnabled(False)
 
-    def choose_sources(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, "Dokumenty spisu", "", "Dokumenty (*.docx *.pdf)")
-        if paths:
-            self.sources = sorted({Path(path).resolve() for path in paths})
-            self.files.clear()
-            self.files.addItems([f"{index}. {path}" for index, path in enumerate(self.sources, 1)])
-            self.start.setEnabled(True)
-
-    def choose_ocr(self):
-        folder = QFileDialog.getExistingDirectory(self, "Složka s ces.traineddata")
-        if folder:
-            if not (Path(folder) / "ces.traineddata").is_file():
-                QMessageBox.warning(self, "Chybí jazyková data", "Ve složce chybí soubor ces.traineddata.")
-                return
-            self.tessdata = Path(folder)
-            self.ocr_status.setText("Čeština pro OCR je k dispozici.")
+    def choose_source(self):
+        source = QFileDialog.getExistingDirectory(self, "Vstupní složka")
+        if source:
+            self.source = source
+            self.source_label.setText(source)
+            self.output_button.setEnabled(True)
 
     def run_batch(self):
         output = QFileDialog.getExistingDirectory(self, "Výstupní složka")
         if not output:
             return
         self.log.clear()
-        for control in self.controls:
-            control.setEnabled(False)
-        self.status.setText(f"Zpracovávám dávku. Výstupní složka: {output}")
-        self.worker = BatchWorker(self.sources, output, self.aliases.toPlainText().splitlines(),
-                                  self.tessdata, self.force_ocr.isChecked(), self)
-        self.worker.result.connect(lambda index, message: self.log.appendPlainText(f"{index}. {message}"))
-        self.worker.failed.connect(self.log.appendPlainText)
+        self.input_button.setEnabled(False)
+        self.output_button.setEnabled(False)
+        self.status.setText(f"Zpracovávám dávku do {output}")
+        self.worker = BatchWorker(self.source, output, self.tessdata, self)
+        self.worker.result.connect(self.log.appendPlainText)
         self.worker.finished.connect(self.finished)
         self.worker.start()
 
     def finished(self):
-        for control in self.controls:
-            control.setEnabled(True)
-        self.log.appendPlainText("Běh ukončen. Zkontrolujte stav všech souborů a celý obsah výstupů.")
+        self.input_button.setEnabled(True)
+        self.output_button.setEnabled(True)
+        self.status.setText("Zpracování skončilo. Zkontrolujte stav souborů a obsah výstupů.")
         self.worker.deleteLater()
         self.worker = None
 
@@ -118,28 +91,28 @@ class Window(QWidget):
 def main():
     app = QApplication(sys.argv)
     window = Window()
+    window.show()
     if "--smoke-test" in sys.argv:
-        assert window.windowTitle() == "SpisRedakt"
         if getattr(sys, "frozen", False):
             smoke_test_package(window.tessdata)
-        return 0
-    window.show()
+        QTimer.singleShot(0, app.quit)
     return app.exec()
 
 
 def smoke_test_package(tessdata):
     import pymupdf
 
-    if tessdata is None:
-        raise RuntimeError("Bundled OCR data is missing.")
     with tempfile.TemporaryDirectory() as scratch, pymupdf.open() as text, pymupdf.open() as scan:
+        source = Path(scratch) / "input"
+        target = Path(scratch) / "output"
+        source.mkdir()
+        target.mkdir()
         page = text.new_page()
         page.insert_text((72, 90), "osoba@example.test", fontsize=22)
         sheet = scan.new_page()
         sheet.insert_image(sheet.rect, pixmap=page.get_pixmap(dpi=240))
-        source = Path(scratch) / "test.pdf"
-        scan.save(source)
-        _, result, error = next(process_batch([source], scratch, tessdata=tessdata))
+        scan.save(source / "test.pdf")
+        _, result, error = next(process_folders(source, target, tessdata))
         if result is None:
             raise RuntimeError(error)
         with pymupdf.open(result) as output:

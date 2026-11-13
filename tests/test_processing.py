@@ -7,7 +7,7 @@ from zipfile import ZipFile
 from docx import Document
 import pymupdf as pdf
 
-from anonymizer.batch import process_batch
+from anonymizer.batch import process_batch, process_folders
 from anonymizer.documents import ocr_path
 from anonymizer.rules import Rules
 
@@ -107,6 +107,50 @@ class ProcessingTests(unittest.TestCase):
     def test_alias_conflict(self):
         with self.assertRaises(ValueError):
             Rules(["Test A | Test B", "Test C | Test B"])
+
+    def test_czech_legal_context(self):
+        rules = Rules()
+        source = ("Ke sp. zn.: Nd 321/2026. V Táboře dne 13. 11. 2026. "
+                  "Po Františku Hradilovi, nar. dne 12. února 1960, "
+                  "posledně bytem Jabloňová 1027, Velké Lhotky, který dne 6. 4. 2020 zemřel. "
+                  "Jednání 7. 5. 2026 u JUDr. Petrem Novákem – Tábor, J. Vrby 4.")
+        output, count = rules.replace(source)
+        self.assertEqual(count, 6)
+        for value in ("Hradilovi", "Novákem", "12. února 1960", "Jabloňová", "Velké Lhotky",
+                      "J. Vrby", "321/2026", "[UCET-"):
+            self.assertNotIn(value, output)
+        for value in ("13. 11. 2026", "6. 4. 2020", "7. 5. 2026", "[SPIS-", "[NAROZENI-"):
+            self.assertIn(value, output)
+        self.assertEqual(rules.replace("František Hradil a Petr Novák")[0], "[OSOBA-2] a [OSOBA-1]")
+        self.assertEqual(rules.replace("Datum narození: 12.2.1960")[0], "Datum narození: [NAROZENI-1]")
+        self.assertEqual(rules.replace("Účet: 12345678/0800")[0], "Účet: [UCET-1]")
+
+    def test_folders_keep_originals_and_share_labels(self):
+        source = self.root / "input"
+        destination = self.root / "output"
+        source.mkdir()
+        destination.mkdir()
+        (source / "nested").mkdir()
+        (source / "ignore.txt").write_text("ignored")
+        (source / "~$lock.docx").write_text("ignored")
+        originals = {}
+        for path, line in ((source / "a.docx", "Anna Hradilová, bytem Tábor, J. Vrby 4."),
+                           (source / "nested" / "b.docx", "Podepsáno Annou Hradilovou.")):
+            doc = Document()
+            doc.add_paragraph(line)
+            doc.save(path)
+            originals[path] = path.read_bytes()
+        for attempt in range(1, 3):
+            results = list(process_folders(source, destination))
+            self.assertEqual(len(results), 2)
+            for original, target, reason in results:
+                self.assertIsNotNone(target, reason)
+                self.assertEqual(target.parent, destination.resolve())
+                self.assertEqual(original.read_bytes(), originals[source / original.relative_to(source.resolve())])
+                self.assertIn("[OSOBA-1]", Document(target).paragraphs[0].text)
+            self.assertEqual(len(list(destination.iterdir())), attempt * 2)
+        with self.assertRaises(ValueError):
+            list(process_folders(source, source / "nested"))
 
 
 if __name__ == "__main__":

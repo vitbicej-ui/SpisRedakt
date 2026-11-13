@@ -2,6 +2,7 @@ import re
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
+from .czech import contextual_findings
 
 
 def key(value):
@@ -13,8 +14,7 @@ RULES = {
     "IBAN": r"(?<!\w)CZ(?:[ \t]?\d){22}(?![ \t]?\d)",
     "RC": r"(?<!\d)\d{6}[ \t]*/[ \t]*\d{3,4}(?!\d)",
     "TELEFON": r"(?<![\w+])(?:\+420[ \t]*)?(?:[67]\d{2}(?:[ \t]?\d{3}){2}|[2-5]\d{2}(?:[ \t]\d{3}){2})(?!\d)",
-    "UCET": r"(?<![\d/])(?:\d{1,6}-)?\d{2,10}/\d{4}(?!\d)",
-    "NAROZENI": r"(?<=[: ])\d{1,2}\.[ \t]*\d{1,2}\.[ \t]*\d{4}\b",
+    "UCET": r"(?:účet|účtu|bankovní spojení|č\.[ \t]*ú\.)[ \t]*:?[ \t]*((?:\d{1,6}-)?\d{2,10}/\d{4})(?!\d)",
     "DIC": r"\bCZ\d{8,10}\b",
     "DOKLAD": r"(?:(?:OP|pas|doklad)[ \t]*(?:č\.[ \t]*)?:[ \t]*)([A-Z0-9]{6,12})\b",
     "ICO": r"(?:IČO?[ \t]*:[ \t]*)(\d{8})\b",
@@ -48,7 +48,8 @@ class Rules:
         self.custom = re.compile(r"(?<!\w)(?:" + "|".join(patterns) + r")(?!\w)", re.I) if patterns else None
 
     def find(self, text):
-        candidates = []
+        candidates = [Finding(start, end, kind, key(identity))
+                      for start, end, kind, identity in contextual_findings(text)]
         if self.custom:
             for match in self.custom.finditer(text):
                 variant = self.variants[match.lastindex - 1]
