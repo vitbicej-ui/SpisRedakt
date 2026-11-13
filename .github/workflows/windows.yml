@@ -1,0 +1,38 @@
+name: Windows
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r requirements-build.txt
+      - name: Czech OCR data
+        shell: pwsh
+        run: ./scripts/get-ocr.ps1
+      - name: Regression tests and GUI startup
+        shell: pwsh
+        run: |
+          $env:SPISREDAKT_TEST_TESSDATA = (Resolve-Path tessdata).Path
+          python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python start.py --smoke-test
+      - name: Package and verify
+        shell: pwsh
+        run: ./scripts/build-windows.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SpisRedakt-Windows-x64
+          path: dist/SpisRedakt/
+          retention-days: 14
