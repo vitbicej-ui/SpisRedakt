@@ -47,7 +47,7 @@ class Window(QWidget):
         self.input_button = QPushButton("1. Vybrat vstupní složku…")
         self.input_button.clicked.connect(self.choose_source)
         layout.addWidget(self.input_button)
-        self.source_label = QLabel("Vyberte složku s původními DOCX, XLSX, PPTX a PDF.")
+        self.source_label = QLabel("Vyberte složku s původními dokumenty, tabulkami, obrázky a archivy.")
         self.source_label.setWordWrap(True)
         layout.addWidget(self.source_label)
         self.output_button = QPushButton("2. Vybrat výstupní složku a zpracovat…")

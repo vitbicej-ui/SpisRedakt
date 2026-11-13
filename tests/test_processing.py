@@ -13,6 +13,37 @@ from anonymizer.rules import Rules
 
 
 class ProcessingTests(unittest.TestCase):
+    def test_mixed_structured_formats_and_renamed_zip(self):
+        source, target = self.root / "input", self.root / "output"
+        source.mkdir()
+        target.mkdir()
+        for name, payload in {
+            "plain.txt": "Kontakt osoba@example.test",
+            "table.csv": "Kontakt;Poznámka\nosoba@example.test;hodnota\n",
+            "table.tsv": "Kontakt\tPoznámka\nosoba@example.test\thodnota\n",
+            "data.json": '{"contact":"osoba@example.test"}',
+            "data.xml": '<contact value="osoba@example.test"/>',
+        }.items():
+            (source / name).write_text(payload, encoding="utf-8")
+        with ZipFile(source / "archive.bin", "w") as archive:
+            archive.writestr("osoba@example.test.txt", "osoba@example.test")
+        with ZipFile(source / "bad.zip", "w") as archive:
+            archive.writestr("unknown.bin", b"unknown")
+        results = list(process_folders(source, target, audit_root=self.root / "audit"))
+        self.assertEqual(len(results), 7)
+        for original, output, reason in results:
+            if original.name == "bad.zip":
+                self.assertIsNone(output)
+                continue
+            self.assertIsNotNone(output, reason)
+            if output.suffix == ".zip":
+                with ZipFile(output) as archive:
+                    self.assertEqual(archive.namelist(), ["polozka-0001.txt"])
+                    self.assertEqual(archive.read("polozka-0001.txt"), b"[EMAIL-1]")
+            else:
+                self.assertIn(b"[EMAIL-1]", output.read_bytes())
+                self.assertNotIn(b"osoba@example.test", output.read_bytes())
+
     def setUp(self):
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
@@ -131,7 +162,7 @@ class ProcessingTests(unittest.TestCase):
         source.mkdir()
         destination.mkdir()
         (source / "nested").mkdir()
-        (source / "ignore.txt").write_text("ignored")
+        (source / "ignore.bin").write_text("ignored")
         (source / "~$lock.docx").write_text("ignored")
         originals = {}
         for path, line in ((source / "a.docx", "Anna Hradilová, bytem Tábor, J. Vrby 4."),

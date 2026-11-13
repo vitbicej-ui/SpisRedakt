@@ -1,4 +1,4 @@
-# SpisRedakt 0.4.0
+# SpisRedakt 0.5.0
 
 Offline aplikace pro Windows pro dávkové zpracování DOCX, XLSX, PPTX a PDF. Vznikla nezávisle s funkční inspirací z [veřejného popisu SKRYI](https://www.skryi.cz/index.html). Licence projektu je AGPL-3.0-only.
 
@@ -27,6 +27,9 @@ Při spuštění ze zdrojů připravte česká data OCR skriptem `./scripts/get-
 Po každé dávce aplikace zobrazí cestu k vlastní složce s průběžným protokolem `events.jsonl` a závěrečným `souhrn.txt`. Výchozí složka `audit` leží vedle aplikace. Chcete-li audity zpřístupnit Codexu i při spuštění aplikace z jiné složky, nastavte před spuštěním proměnnou `SPISREDAKT_AUDIT_DIR` na místní zapisovatelnou složku v pracovním prostoru. Při chybě při založení auditu aplikace zkusí místní dočasnou složku. Protokol obsahuje pořadová čísla, formáty a kódy výsledků bez obsahu, názvů a cest zpracovaných dokumentů. Opakovaná dávka přidá k existujícímu výstupu příponu `_2`, `_3` atd.
 
 ## Rozsah zpracování
+
+- Dávka přijímá TXT, CSV, TSV, JSON a XML, samostatné PNG, JPEG a BMP a ZIP s textovými soubory nebo vnořenými ZIP. XML s DTD a archivy s jinými položkami se nevydávají. Rozpoznání podle signatury funguje u PDF, ZIP, moderního Office a podporovaných obrázků. Textové formáty používají příponu.
+- Kontrola před zveřejněním znovu načte textové výstupy a ověří, že pravidla nenajdou další náhrady. U Office a ZIP ověřuje také čitelnost balíčku. Výsledek kontroly vypovídá o použitých pravidlech a zpracovaných vrstvách. Kontextově nepřímá identifikace a nerozpoznané údaje zůstávají možné.
 
 - DOCX, XLSX a PPTX zachovávají strukturu odstavců, tabulek, buněk a snímků a jejich styly. Štítek převezme formát začátku nahrazeného textu. Délka štítku může ovlivnit zalomení nebo výšku řádků. U běžných externích hypertextových odkazů se cílová adresa nahradí nefunkční adresou. Externě načítaná data či obrázky, makra a vložené přílohy mohou zpracování zastavit. Kontrolujte i skryté listy, názvy, vzorce a číselné buňky. Automatická pravidla pro strukturované datum nebo identifikátor v samostatné buňce podle nadpisu sloupce zatím chybí.
 - Vložené PNG a JPEG procházejí OCR v plném rozsahu včetně částí schovaných ořezem. Nalezený text se začerní přímo v pixelech a obrázek se znovu uloží bez původních obrazových metadat. Zachová se umístění, velikost a ořez v dokumentu. Pokud OCR nenajde žádný čitelný text, celý obrázek se začerní. Obrázky mohou ztratit průhlednost a OCR může přehlédnout údaje, zejména u malého textu, rukopisu a kódů. Další obrazové formáty zatím vyžadují převod na PNG nebo JPEG.
