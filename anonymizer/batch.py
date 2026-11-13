@@ -34,7 +34,7 @@ def process_folders(input_root, output_root, tessdata=None):
                 if suffix == ".pdf":
                     redact_pdf(source, temporary, rules, tessdata)
                 else:
-                    redact_office(source, temporary, rules)
+                    redact_office(source, temporary, rules, tessdata)
                 if os.name == "nt":
                     temporary.rename(destination)
                 else:

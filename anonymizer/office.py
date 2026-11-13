@@ -3,6 +3,9 @@ import re
 from zipfile import ZipFile
 
 from lxml import etree
+import pymupdf as pdf
+
+from .documents import MAX_PIXELS, recognize_image, redact_geometry
 
 WORD = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 SHEET = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -13,7 +16,9 @@ BLOCKS = {
     ".xlsx": (SHEET, "si"),
     ".pptx": (DRAW, "p"),
 }
-UNSUPPORTED = re.compile(r"(?:^|/)(?:embeddings|activeX|externalLinks|pivotCache|queryTables|threadedComments|charts|media|diagrams|_xmlsignatures)(?:/|$)|vbaProject|printerSettings", re.I)
+UNSUPPORTED = re.compile(r"(?:^|/)(?:embeddings|activeX|externalLinks|pivotCache|queryTables|threadedComments|diagrams|_xmlsignatures)(?:/|$)|vbaProject", re.I)
+MEDIA = re.compile(r"^(?:word|xl|ppt)/media/[^/]+\.(png|jpe?g)$", re.I)
+DISABLED_LINK = "https://example.invalid/"
 
 
 def stripped_part(name):
@@ -68,9 +73,36 @@ def office_blocks(root, suffix):
         name = f"{{{DRAW}}}p"
         for block in root.iter(name):
             yield list(text_nodes(block, DRAW, name))
+    chart = "{http://schemas.openxmlformats.org/drawingml/2006/chart}"
+    for cache in root.iter(chart + "strCache", chart + "strLit", chart + "multiLvlStrCache"):
+        for node in cache.iter(chart + "v"):
+            yield [node]
 
 
-def redact_office(source, destination, rules):
+def redact_image(data, extension, rules, tessdata):
+    with pdf.open(stream=data, filetype=extension) as image:
+        if image.page_count != 1:
+            raise ValueError("Vložený obrázek má více snímků.")
+        page = image[0]
+        images = page.get_image_info()
+        if len(images) != 1:
+            raise ValueError("Vložený obrázek nelze vykreslit.")
+        info = images[0]
+        width, height = info["width"], info["height"]
+        if width * height > MAX_PIXELS:
+            raise ValueError("Vložený obrázek překračuje limit velikosti.")
+        matrix = pdf.Matrix(width / page.rect.width, height / page.rect.height)
+        pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+    content, geometry, transform = recognize_image(pixmap, tessdata)
+    if not content.strip():
+        # OCR cannot distinguish a decorative image from unreadable sensitive text.
+        pixmap.clear_with(0)
+    else:
+        redact_geometry(pixmap, rules, content, geometry, transform)
+    return pixmap.tobytes("png" if extension == "png" else "jpeg", jpg_quality=100)
+
+
+def redact_office(source, destination, rules, tessdata=None):
     suffix = source.suffix.lower()
     main = {".docx": "word/document.xml", ".xlsx": "xl/workbook.xml",
             ".pptx": "ppt/presentation.xml"}[suffix]
@@ -87,7 +119,12 @@ def redact_office(source, destination, rules):
             if stripped_part(name):
                 continue
             data = original.read(entry)
-            if name.endswith((".xml", ".rels", ".vml")):
+            media = MEDIA.fullmatch(name)
+            if media:
+                data = redact_image(data, media[1].lower(), rules, tessdata)
+            elif "/media/" in name:
+                raise ValueError("Vložený obrázek má nepodporovaný formát. Použijte PNG nebo JPEG.")
+            elif name.endswith((".xml", ".rels", ".vml")):
                 parser = etree.XMLParser(resolve_entities=False, no_network=True)
                 root = etree.fromstring(data, parser=parser)
                 if root.getroottree().docinfo.doctype:
@@ -98,7 +135,10 @@ def redact_office(source, destination, rules):
                         if stripped_part(part):
                             root.remove(node)
                         elif node.get("TargetMode") == "External":
-                            raise ValueError("Soubor obsahuje externí odkaz. Před zpracováním ho odeberte.")
+                            if node.get("Type", "").endswith("/hyperlink"):
+                                node.set("Target", DISABLED_LINK)
+                            else:
+                                raise ValueError("Soubor načítá externí data nebo obrázek. Vložte je přímo do dokumentu.")
                 elif name.startswith("docProps/"):
                     for node in root:
                         if name.endswith("custom.xml"):
@@ -117,8 +157,15 @@ def redact_office(source, destination, rules):
                         local = etree.QName(node).localname
                         if local in {"delText", "delInstrText"}:
                             node.text = ""
-                        if local == "Relationship" and node.get("TargetMode") == "External":
-                            raise ValueError("Soubor obsahuje externí odkaz. Před zpracováním ho odeberte.")
+                        if local in {"instrText", "fldSimple"}:
+                            instruction = next((attr for attr in node.attrib if etree.QName(attr).localname == "instr"), None)
+                            code = node.get(instruction, "") if instruction else node.text or ""
+                            if re.search(r"\bHYPERLINK\b", code, re.I):
+                                replacement = ' HYPERLINK "' + DISABLED_LINK + '" '
+                                if instruction:
+                                    node.set(instruction, replacement)
+                                else:
+                                    node.text = replacement
                         if local in {"f", "formula", "formula1", "formula2", "definedName", "instrText"}:
                             if rules.find(node.text or ""):
                                 raise ValueError("Vzorec nebo pole obsahuje citlivý text. Zkontrolujte jej ručně.")

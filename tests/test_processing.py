@@ -8,7 +8,7 @@ from docx import Document
 import pymupdf as pdf
 
 from anonymizer.batch import process_batch, process_folders
-from anonymizer.documents import ocr_path
+from anonymizer.documents import ocr_path, recognize_image
 from anonymizer.rules import Rules
 
 
@@ -206,6 +206,49 @@ class ProcessingTests(unittest.TestCase):
                     for marker in preserved:
                         self.assertIn(marker, data)
                     self.assertIn(b"Cambria", archive.read(styles))
+
+    @unittest.skipUnless(os.environ.get("SPISREDAKT_TEST_TESSDATA"), "Chybí testovací jazyková data.")
+    def test_word_image_and_hyperlink(self):
+        from io import BytesIO
+        from docx.oxml import OxmlElement
+        from docx.opc.constants import RELATIONSHIP_TYPE
+        from docx.shared import Inches
+        from anonymizer.office import redact_office
+
+        source = self.root / "image.docx"
+        target = self.root / "clean.docx"
+        doc = Document()
+        paragraph = doc.add_paragraph("Kontakt ")
+        link = OxmlElement("w:hyperlink")
+        link.set("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id",
+                 doc.part.relate_to("mailto:" + self.email, RELATIONSHIP_TYPE.HYPERLINK, is_external=True))
+        run = paragraph.add_run(self.email)
+        run.bold = True
+        link.append(run._element)
+        paragraph._element.append(link)
+        with pdf.open() as sample:
+            page = sample.new_page(width=430, height=90)
+            page.insert_text((40, 50), self.email, fontsize=22)
+            image = doc.add_picture(BytesIO(page.get_pixmap(dpi=240).tobytes("png")), width=Inches(4))
+        crop = OxmlElement("a:srcRect")
+        crop.set("l", "5000")
+        image._inline.graphic.graphicData.pic.blipFill.insert(1, crop)
+        doc.save(source)
+        redact_office(source, target, Rules(), os.environ["SPISREDAKT_TEST_TESSDATA"])
+        output = Document(target)
+        self.assertEqual(output.inline_shapes[0].width, Inches(4))
+        with ZipFile(target) as archive:
+            xml = archive.read("word/document.xml")
+            self.assertIn(b'l="5000"', xml)
+            self.assertIn(b"[EMAIL-1]", xml)
+            self.assertNotIn(self.email.encode(), archive.read("word/_rels/document.xml.rels"))
+            media = next(name for name in archive.namelist() if name.startswith("word/media/"))
+            pixmap = pdf.Pixmap(archive.read(media))
+            colors = pixmap.color_count(colors=True)
+            self.assertGreater(colors.get(bytes(3), 0), 7_000)
+            self.assertGreater(colors.get(b"\xff\xff\xff", 0), 10_000)
+            text, _, _ = recognize_image(pixmap, os.environ["SPISREDAKT_TEST_TESSDATA"])
+            self.assertNotIn(self.email, text)
 
 
 if __name__ == "__main__":

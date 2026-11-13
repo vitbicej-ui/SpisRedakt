@@ -104,6 +104,30 @@ def blackout(pixmap, rectangle, matrix):
     return pixel_rect
 
 
+def redact_geometry(pixmap, rules, text, geometry, transform):
+    redacted = []
+    for item in rules.find(text):
+        lines = {}
+        for entry in geometry[item.start:item.end]:
+            if entry is not None:
+                line_id, bbox = entry
+                lines[line_id] = lines.get(line_id, pdf.Rect()) | bbox
+        if not lines:
+            raise ValueError("Nalezený údaj nelze umístit na stránku.")
+        redacted.extend(blackout(pixmap, area, transform) for area in lines.values())
+    return redacted
+
+
+def recognize_image(pixmap, tessdata):
+    if tessdata is None or not (Path(tessdata) / "ces.traineddata").is_file():
+        raise ValueError("Obraz vyžaduje česká data OCR (ces.traineddata).")
+    with pdf.open("pdf", pixmap.pdfocr_tobytes(language="ces", tessdata=ocr_path(tessdata))) as recognized:
+        page = recognized[0]
+        text, boxes = text_geometry(page.get_text("rawdict", flags=pdf.TEXTFLAGS_RAWDICT & ~pdf.TEXT_PRESERVE_IMAGES))
+        matrix = pdf.Matrix(pixmap.width / page.rect.width, pixmap.height / page.rect.height)
+        return text, boxes, matrix
+
+
 def redact_pdf(source, destination, rules, tessdata=None, force_ocr=False):
     scale = pdf.Matrix(300 / 72, 300 / 72)
     expected = []
@@ -119,26 +143,13 @@ def redact_pdf(source, destination, rules, tessdata=None, force_ocr=False):
             matrix = page.rotation_matrix * scale
             sources = [(text, boxes, matrix)]
             if force_ocr or page.get_image_info() or page.get_drawings() or not text.strip() or "\ufffd" in text:
-                if tessdata is None or not (Path(tessdata) / "ces.traineddata").is_file():
-                    raise ValueError("Tato stránka vyžaduje česká data OCR (ces.traineddata).")
-                with pdf.open("pdf", pixmap.pdfocr_tobytes(language="ces", tessdata=ocr_path(tessdata))) as recognized:
-                    ocr_text, ocr_boxes = text_geometry(recognized[0].get_text("rawdict", flags=pdf.TEXTFLAGS_RAWDICT & ~pdf.TEXT_PRESERVE_IMAGES))
-                    if not ocr_text.strip():
-                        raise ValueError("OCR nenašlo čitelný text. Stránku zkontrolujte ručně.")
-                    ocr_matrix = pdf.Matrix(pixmap.width / recognized[0].rect.width,
-                                            pixmap.height / recognized[0].rect.height)
-                    sources.append((ocr_text, ocr_boxes, ocr_matrix))
+                recognized = recognize_image(pixmap, tessdata)
+                if not recognized[0].strip():
+                    raise ValueError("OCR nenašlo čitelný text. Stránku zkontrolujte ručně.")
+                sources.append(recognized)
             redacted = []
             for content, geometry, transform in sources:
-                for item in rules.find(content):
-                    lines = {}
-                    for entry in geometry[item.start:item.end]:
-                        if entry is not None:
-                            line_id, bbox = entry
-                            lines[line_id] = lines.get(line_id, pdf.Rect()) | bbox
-                    if not lines:
-                        raise ValueError("Nalezený údaj nelze umístit na stránku.")
-                    redacted.extend(blackout(pixmap, area, transform) for area in lines.values())
+                redacted.extend(redact_geometry(pixmap, rules, content, geometry, transform))
             target = output.new_page(width=page.rect.width, height=page.rect.height)
             target.insert_image(target.rect, pixmap=pixmap, keep_proportion=False)
             expected.append(redacted)

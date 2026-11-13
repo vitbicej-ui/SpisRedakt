@@ -1,4 +1,4 @@
-# SpisRedakt 0.3.0
+# SpisRedakt 0.3.1
 
 Offline aplikace pro Windows pro dávkové zpracování DOCX, XLSX, PPTX a PDF. Vznikla nezávisle s funkční inspirací z [veřejného popisu SKRYI](https://www.skryi.cz/index.html). Licence projektu je AGPL-3.0-only.
 
@@ -24,7 +24,8 @@ Při spuštění ze zdrojů připravte česká data OCR skriptem `./scripts/get-
 
 ## Rozsah první verze
 
-- DOCX, XLSX a PPTX zachovávají strukturu odstavců, tabulek, buněk a snímků a jejich styly. Štítek převezme formát začátku nahrazeného textu. Délka štítku může ovlivnit zalomení nebo výšku řádků. Dokumenty s obrázky, grafy, přílohami, makry nebo externími odkazy se mohou odmítnout. Kontrolujte i skryté listy, názvy, vzorce a číselné buňky. Automatická pravidla pro strukturované datum nebo identifikátor v samostatné buňce podle nadpisu sloupce zatím chybí.
+- DOCX, XLSX a PPTX zachovávají strukturu odstavců, tabulek, buněk a snímků a jejich styly. Štítek převezme formát začátku nahrazeného textu. Délka štítku může ovlivnit zalomení nebo výšku řádků. U běžných externích hypertextových odkazů se cílová adresa nahradí nefunkční adresou. Externě načítaná data či obrázky, makra a vložené přílohy mohou zpracování zastavit. Kontrolujte i skryté listy, názvy, vzorce a číselné buňky. Automatická pravidla pro strukturované datum nebo identifikátor v samostatné buňce podle nadpisu sloupce zatím chybí.
+- Vložené PNG a JPEG procházejí OCR v plném rozsahu včetně částí schovaných ořezem. Nalezený text se začerní přímo v pixelech a obrázek se znovu uloží bez původních obrazových metadat. Zachová se umístění, velikost a ořez v dokumentu. Pokud OCR nenajde žádný čitelný text, celý obrázek se začerní. Obrázky mohou ztratit průhlednost a OCR může přehlédnout údaje, zejména u malého textu, rukopisu a kódů. Další obrazové formáty zatím vyžadují převod na PNG nebo JPEG.
 - Pravidla hledají e-maily, české telefony, rodná čísla, označené bankovní účty a spisové značky, CZ IBAN, DIČ, označená IČO a doklady. Datum narození se rozpoznává podle slov v okolí, například `nar. dne` nebo `datum narození`. Data podpisu, jednání a úmrtí se ponechávají.
 - Jména hledá rozšířený slovník tvarů běžných křestních jmen a právní kontext. Zahrnuje běžné zápisy verzálkami a příjmení se spojovníkem. Příjmení se sjednocují podle koncovek a některých případů pohyblivého e. Adresy se hledají po slovech jako `bytem` a v běžných zápisech s obcí a číslem domu. Neobvyklé tvary, iniciály, netypické adresy nebo OCR chyby mohou uniknout.
 - DOCX používá stejné štítky pro shodné hodnoty a rozpoznané varianty v jedné dávce. Mapa je pouze v paměti. Stejnojmenné osoby se mohou sloučit a číslování se při změně dávky může změnit. PDF používá černé plochy bez štítků.
