@@ -1,56 +1,92 @@
-# SpisRedakt 0.6.0
+# SpisRedakt 0.7.0 (rozpracováno, nevydáno)
 
-Offline aplikace pro Windows pro dávkové zpracování DOCX, XLSX, PPTX a PDF. Vznikla nezávisle s funkční inspirací z [veřejného popisu SKRYI](https://www.skryi.cz/index.html). Licence projektu je AGPL-3.0-only.
+Offline aplikace pro Windows pro dávkovou anonymizaci českých a slovenských spisů. Vznikla nezávisle s funkční inspirací z [veřejného popisu SKRYI](https://www.skryi.cz/index.html). Licence projektu je AGPL-3.0-only.
 
 ## Spuštění
 
-Rozbalte celý balíček pro Windows a spusťte **SpisRedakt.exe**. Vedle programu je složka `tessdata` s českým modelem. Program nemá síťové funkce. Instalace závislostí při sestavení ze zdrojů vyžaduje internet nebo místní balíčky.
+Rozbalte celý balíček pro Windows a spusťte **SpisRedakt.exe**. Vedle programu je složka `tessdata` s českým modelem OCR. Program nemá síťové funkce.
 
 Ze zdrojů v PowerShellu s Pythonem 3.13:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\scripts\get-ocr.ps1
 .\.venv\Scripts\python.exe start.py
 ```
 
-Při spuštění ze zdrojů připravte česká data OCR skriptem `./scripts/get-ocr.ps1`. Vytvoří složku `tessdata` vedle `start.py`. Pokud OCR nedokáže otevřít cestu s diakritikou, rozbalte celou aplikaci do složky s cestou bez diakritiky, například `C:\SpisRedakt`.
+Pokud OCR nedokáže otevřít cestu s diakritikou, rozbalte aplikaci do složky bez diakritiky, například `C:\SpisRedakt`.
+
+Jednorázové zpracování bez okna: `SpisRedakt.exe --once <vstupní složka> <výstupní složka>`.
 
 ## Práce se spisem
 
-Aplikace si pamatuje obě složky. Dokud je otevřená, sleduje nové a změněné soubory a čeká na dvě shodné kontroly velikosti a času změny. Stejný soubor pro stejný výstup automaticky neopakuje ani po restartu. Tlačítko „Zpracovat složku znovu“ umožní zopakovat dávku. Soubory zachycené v různých dávkách mohou dostat odlišné pseudonymy.
+Vstupní a výstupní složku nastavíte jednou; aplikace si je pamatuje. Dokud je otevřená, sleduje vstupní složku včetně podsložek a zpracuje každý nový nebo změněný soubor, jakmile se dvě kontroly po sobě nezmění jeho velikost ani čas a soubor jde otevřít (kopírování po částech tedy počká).
 
-Pokud aplikace rozpozná slovenský výpis z rejstříku trestů nebo osobní formulář v PDF, výstup nevydá. Rozpoznání formuláře závisí na čitelnosti textu a OCR. Neúplnou redakci ze starších verzí nepoužívejte pro sdílení.
+- `Smlouva.docx` se uloží jako `Smlouva_anonymizovano.docx`, struktura podsložek zůstává. Originály se nikdy nemění.
+- Stejnou verzi souboru aplikace nezpracuje podruhé, ani po restartu. Smazání výstupu nové zpracování nespustí. Přejmenovaný nebo změněný vstup je nový soubor.
+- Tlačítko „Zpracovat složku znovu“ dávku zopakuje; výsledky dostanou volné názvy `_anonymizovano_2`, `_3` atd.
+- Zamčený soubor se zkouší znovu (nejvýše pětkrát). Je-li některá složka nedostupná, sledování počká na její připojení.
 
-1. Vyberte vstupní složku s dokumenty jednoho spisu. Program zpracuje DOCX, XLSX, PPTX a PDF i v podsložkách. Ostatní formáty přeskočí.
-2. Vyberte samostatnou výstupní složku a tím spusťte dávku. Název `Smlouva.docx` se změní na `Smlouva_anonymizovano.docx`. Struktura podsložek zůstává zachována. Originály i existující výstupy zůstanou beze změny. Název souboru může obsahovat osobní údaj, proto zkontrolujte také názvy před sdílením.
-3. Porovnejte každý výstup s originálem, včetně všech stran, příloh a významu ponechaného textu. Případné přehlédnuté údaje odstraňte před sdílením.
+**Soubor, jehož výsledek nelze ověřit, se do výstupní složky nevydá.** Dávka pokračuje dalšími soubory a důvod je v protokolu aplikace i v auditu.
+
+## Co se odstraňuje
+
+- Osoby: jména ve všech pádech (slovník asi 2 800 tvarů českých a slovenských křestních jmen), jména po titulech a procesních rolích, příjmení před jménem, iniciály (`J. Novák`, `Vendulka H.`), neuvedená křestní jména před již známým příjmením a osamocená příjmení uprostřed věty. Příjmení poznaná kdekoli v dokumentu se odstraní ve všech jeho částech i pádech; jedna osoba má v textových formátech jeden štítek, různé osoby s podobným jménem různé.
+- Organizace s právní formou (`s.r.o.`, `a.s.`, `spol. s r.o.`, `v.o.s.`, `k.s.` a další) včetně víceslovných názvů a jejich pozdějších zmínek bez právní formy.
+- Adresy po slovech `bytem`, `sídlem`, `trvale bytom` apod. i samostatné zápisy ulice, čísla, PSČ a obce včetně zkratek `ul.`, `nám.`, `tř.`, `nábř.`.
+- Data narození (podle uvození), rodná čísla, IČO i s mezerami, DIČ, doklady, bankovní účty, IBAN CZ/SK, telefony CZ/SK, e-maily, webové domény, datové schránky, registrační značky, VIN a spisové značky.
+- Hodnoty osobních polí formulářů (`Meno:`, `Priezvisko:`, `Rodné číslo:` …) v textu i v tabulkách Wordu.
+
+Zachovávají se peněžní částky, procesní data, lhůty, citace předpisů a názvy soudů.
+
+## Slovenský výpis z registra trestov a osobní formuláře v PDF
+
+Formulář se zpracovává **podle polohy**, ne podle pořadí textu. Aplikace najde popisky polí (snese i mírně poškozené OCR), a celý vodorovný pás každého popisku začerní kromě popisku samotného – hodnota tak zmizí, ať je vedle popisku nebo pod ním, a to i když ji OCR nepřečetlo (rukopis, razítko). Hodnoty přečtené z formuláře se pak odstraní i jinde v dokumentu. Husté grafické bloky (QR a čárové kódy, fotografie) se na formuláři začerní.
+
+Výpis se vydá, jen když jsou nalezena pole meno, priezvisko, dátum narodenia, rodné číslo nebo číslo dokladu a celkem aspoň 8 z 12 očekávaných polí. Chybí-li některé, pásy se pro jistotu rozšíří o řádek. Jinak se soubor zadrží.
+
+## Kontrola vydání
+
+Každý výsledek se před vydáním znovu přečte nezávisle na tom, co nahlásily detektory:
+
+- PDF a obrázky: hotový obraz stránky projde novým OCR. Najde-li se v něm údaj, začerní se a kontrola se opakuje; zůstane-li i potom, soubor se zadrží. Na formuláři nesmí v pásech hodnot zůstat nic čitelného. Uložený obraz se porovná s kontrolovaným.
+- DOCX, XLSX, PPTX: znovu se otevře zapsaný balíček a projde se veškerý text všech částí včetně metadat, komentářů, poznámek a nepodporovaných částí.
+- Textové formáty a ZIP: výstup se znovu zpracuje a nesmí se změnit.
+
+Testy tuto kontrolu ověřují záměrně rozbitou detekcí: nezačerněné pole i nenahrazený text musí vést k zadržení.
+
+## Meze, které je třeba znát
+
+Žádný automat nemůže zaručit úplnost u libovolného dokumentu. Konkrétně:
+
+- Osamocené příjmení na začátku věty, které se v dokumentu nikde nevyskytuje se jménem, titulem ani rolí, nemusí být rozpoznáno.
+- Rukopis, razítka a podpisy mimo formulářová pole OCR nečte; zůstávají v obraze.
+- Nepřímá identifikace z kontextu (funkce, popis události, vzácné povolání) se neposuzuje.
+- OCR používá český model; slovenské znaky čte přibližně. Popisky formuláře se proto hledají s tolerancí.
+- Aplikace raději odstraní víc: může začernit i název obce nebo běžné slovo psané s velkým písmenem uprostřed věty.
+- Nepodporované jsou DOC, XLS, RTF, EML, MSG, 7z a RAR; přeskočí se. Office soubory s makry, vloženými objekty nebo externími daty se zadrží. Tabulkový formulář v XLSX/PPTX s osobními poli se zadrží.
+- PDF výstup je obraz stránky při 300 DPI bez textové vrstvy.
 
 ## Audit dávky
 
-Po každé dávce aplikace zobrazí cestu k vlastní složce s průběžným protokolem `events.jsonl` a závěrečným `souhrn.txt`. Výchozí složka `audit` leží vedle aplikace. Chcete-li audity zpřístupnit Codexu i při spuštění aplikace z jiné složky, nastavte před spuštěním proměnnou `SPISREDAKT_AUDIT_DIR` na místní zapisovatelnou složku v pracovním prostoru. Při chybě při založení auditu aplikace zkusí místní dočasnou složku. Protokol obsahuje pořadová čísla, formáty a kódy výsledků bez obsahu, názvů a cest zpracovaných dokumentů. Opakovaná dávka přidá k existujícímu výstupu příponu `_2`, `_3` atd.
-
-## Rozsah zpracování
-
-- Dávka přijímá TXT, CSV, TSV, JSON a XML, samostatné PNG, JPEG a BMP a ZIP s textovými soubory nebo vnořenými ZIP. XML s DTD a archivy s jinými položkami se nevydávají. Rozpoznání podle signatury funguje u PDF, ZIP, moderního Office a podporovaných obrázků. Textové formáty používají příponu.
-- Kontrola před zveřejněním znovu načte textové výstupy a ověří, že pravidla nenajdou další náhrady. U Office a ZIP ověřuje také čitelnost balíčku. Výsledek kontroly vypovídá o použitých pravidlech a zpracovaných vrstvách. Kontextově nepřímá identifikace a nerozpoznané údaje zůstávají možné.
-
-- DOCX, XLSX a PPTX zachovávají strukturu odstavců, tabulek, buněk a snímků a jejich styly. Štítek převezme formát začátku nahrazeného textu. Délka štítku může ovlivnit zalomení nebo výšku řádků. U běžných externích hypertextových odkazů se cílová adresa nahradí nefunkční adresou. Externě načítaná data či obrázky, makra a vložené přílohy mohou zpracování zastavit. Kontrolujte i skryté listy, názvy, vzorce a číselné buňky. Automatická pravidla pro strukturované datum nebo identifikátor v samostatné buňce podle nadpisu sloupce zatím chybí.
-- Vložené PNG a JPEG procházejí OCR v plném rozsahu včetně částí schovaných ořezem. Nalezený text se začerní přímo v pixelech a obrázek se znovu uloží bez původních obrazových metadat. Zachová se umístění, velikost a ořez v dokumentu. Pokud OCR nenajde žádný čitelný text, celý obrázek se začerní. Obrázky mohou ztratit průhlednost a OCR může přehlédnout údaje, zejména u malého textu, rukopisu a kódů. Další obrazové formáty zatím vyžadují převod na PNG nebo JPEG.
-- Pravidla hledají e-maily, české telefony, rodná čísla, označené bankovní účty a spisové značky, CZ IBAN, DIČ, označená IČO a doklady. Datum narození se rozpoznává podle slov v okolí, například `nar. dne` nebo `datum narození`. Data podpisu, jednání a úmrtí se ponechávají.
-- Jména hledá rozšířený slovník tvarů běžných křestních jmen a právní kontext. Zahrnuje běžné zápisy verzálkami a příjmení se spojovníkem. Příjmení se sjednocují podle koncovek a některých případů pohyblivého e. Adresy se hledají po slovech jako `bytem` a v běžných zápisech s obcí a číslem domu. Neobvyklé tvary, iniciály, netypické adresy nebo OCR chyby mohou uniknout.
-- DOCX používá stejné štítky pro shodné hodnoty a rozpoznané varianty v jedné dávce. Mapa je pouze v paměti. Stejnojmenné osoby se mohou sloučit a číslování se při změně dávky může změnit. PDF používá černé plochy bez štítků.
-- PDF znovu sestaví každou stránku z jednoho obrazu při 300 DPI. Detekce používá souřadnice znaků původního textu a podle obsahu stránky i české OCR nad vykresleným obrazem. Začernění mění samotné pixely před vložením obrazu. Původní textová vrstva, odkazy, metadata, anotace a souborové přílohy se nepřenášejí. Kontrola znovu otevře výstup, zkontroluje jeho strukturu a černé pixely v nalezených oblastech. Výstup není prohledávatelný a může být větší než vstup.
-- PDF s obrázky, vektorovou grafikou nebo bez čitelného textu vyžadují OCR. U prázdných nebo nečitelných stránek může zpracování souboru skončit chybou. Ručně ověřte zejména skeny, razítka, podpisy, fotografie, rukopis, grafiku, QR a čárové kódy. OCR neumí spolehlivě rozpoznat citlivý obsah v těchto prvcích. GUI zatím nenabízí ruční vyznačování ploch.
-- Kontrola ověřuje provedení nalezených náhrad. Úplnost detekce a možnost nepřímé identifikace z kontextu musí posoudit člověk. Vstupy a pracovní výstupy držte v místní složce mimo synchronizované úložiště.
+Každá dávka zapíše `events.jsonl` a `souhrn.txt` do složky `audit` vedle aplikace (nebo do `SPISREDAKT_AUDIT_DIR`). Protokol obsahuje pořadová čísla, formáty, stav (`released`, `withheld`, `failed`, `skipped`), kód důvodu (`form_incomplete`, `form_field_unredacted`, `residual_data` …) a u vydaných souborů výsledky kontrol. Neobsahuje obsah, názvy ani cesty dokumentů.
 
 ## Testy a sestavení
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
-$env:SPISREDAKT_TEST_TESSDATA = 'C:\SpisRedakt\tessdata'
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --windowed --name SpisRedakt start.py
+$env:SPISREDAKT_TEST_TESSDATA = (Resolve-Path tessdata).Path
+.\.venv\Scripts\python.exe -m unittest discover -s tests
+.\scripts\build-windows.ps1
 ```
 
-Testy generují syntetické soubory. GitHub Actions sestavuje balíček na Windows, testuje OCR a ověřuje start zabalené aplikace. Pokyny k dalším iteracím jsou v [AUTOMATION.md](AUTOMATION.md).
+Všechny testy používají výhradně smyšlené údaje.
+
+- `tests/test_scenarios.py` – oba referenční scénáře (slovenský výpis: textové PDF i sken, hodnoty vedle i pod popisky, tři pořadí textových bloků, bez nadpisu, poškozené OCR, neúplný formulář, druhá strana; české usnesení: DOCX, PDF, sken), kontrola vydání se záměrnou poruchou a smíšená dávka všech formátů. Úniky se ověřují podle známých poloh v obraze, ne podle detektorů.
+- `tests/measure.py` – měření na náhodně skládaných dokumentech s vlastním skloňováním: `python tests/measure.py 100 300`.
+- `tests/challenge.py` – ručně psané záludné případy.
+- `tests/test_watch.py` – sledování složek včetně běhu skutečného okna bez displeje.
+- `tests/mixed.py` – smíšená dávka pro ověření sestavené aplikace: `build` vytvoří vstup, `verify` zkontroluje výstup.
+
+Pokyny k dalším iteracím jsou v [AUTOMATION.md](AUTOMATION.md).

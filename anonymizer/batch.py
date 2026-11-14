@@ -38,6 +38,7 @@ def _process_folders(input_root, output_root, tessdata, audit, selected):
         phase = "identify"
         attempts = 0
         collisions = 0
+        report = {}
         try:
             with source.open("rb") as stream:
                 data = stream.read(MAX_BYTES + 1)
@@ -67,7 +68,7 @@ def _process_folders(input_root, output_root, tessdata, audit, selected):
                 with tempfile.TemporaryDirectory(prefix="SpisRedakt-input-") as private:
                     staged = Path(private) / ("input" + suffix)
                     staged.write_bytes(data)
-                    redact_file(staged, temporary, suffix, rules, tessdata)
+                    redact_file(staged, temporary, suffix, rules, tessdata, report)
                 phase = "publish"
                 while True:
                     try:
@@ -85,14 +86,15 @@ def _process_folders(input_root, output_root, tessdata, audit, selected):
                         "permission_denied" if isinstance(error, PermissionError) else
                         "validation_or_unsupported_feature" if isinstance(error, ValueError) else
                         "io_error" if isinstance(error, OSError) else "processing_error")
-                audit.record("failed", phase=phase, code=code, attempts=attempts, **fields)
+                audit.record("withheld" if phase == "redact_and_validate" and isinstance(error, ValueError) else "failed",
+                             phase=phase, code=code, attempts=attempts, **fields)
             reason = str(error) if isinstance(error, FormatError) or type(error) is ValueError else type(error).__name__
             yield source, None, reason
         else:
             if audit:
                 audit.record("released", phase=phase, code="pipeline_passed", attempts=attempts,
                              fallback="numbered_filename" if collisions else None,
-                             collisions=collisions, **fields)
+                             collisions=collisions, checks=report, **fields)
             yield source, destination, ""
 
 
@@ -122,7 +124,7 @@ def process_batch(sources, output_root, alias_lines=(), tessdata=None, force_ocr
                 raise ValueError("Nepodporovaný formát.")
         except Exception as error:
             destination.unlink(missing_ok=True)
-            reason = str(error) if type(error) is ValueError else type(error).__name__
+            reason = str(error) if isinstance(error, FormatError) or type(error) is ValueError else type(error).__name__
             yield source, None, reason
         else:
             yield source, destination, ""
