@@ -1,4 +1,4 @@
-# Ruční test verze 0.8.0
+# Ruční test verze 0.8.1
 
 Testujte jen na kopiích dokumentů v místní složce mimo synchronizované úložiště. Výstupy nesdílejte, dokud je člověk neporovná s originálem.
 

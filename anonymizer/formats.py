@@ -18,6 +18,8 @@ ODF = {".odt", ".ods", ".odp"}
 MAIL = {".eml", ".msg"}
 LEGACY = {".doc": ".docx", ".xls": ".xlsx"}
 SUPPORTED = TEXT | IMAGES | SCANS | ODF | MAIL | LEGACY.keys() | BLOCKS.keys() | {".pdf", ".zip", ".rtf"}
+LARGE_FORMATS = {".pdf", ".tif", ".tiff", ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".eml", ".msg",
+                 ".doc", ".xls", ".rtf"}
 # Formats that cannot be written back safely are released in a related format.
 OUTPUT = {".tif": ".pdf", ".tiff": ".pdf", ".msg": ".eml", **LEGACY}
 
@@ -25,6 +27,9 @@ OUTPUT = {".tif": ".pdf", ".tiff": ".pdf", ".msg": ".eml", **LEGACY}
 def output_suffix(suffix):
     return OUTPUT.get(suffix, suffix)
 MAX_BYTES = 40_000_000
+# Scans and documents with images are processed page by page or part by part,
+# so they may be much larger than text formats and archives.
+LARGE_BYTES = 400_000_000
 
 
 class FormatError(ValueError):

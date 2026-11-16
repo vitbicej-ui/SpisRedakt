@@ -220,7 +220,7 @@ def redact_odf(source, destination, rules, tessdata=None, redact_image=None):
         if not identify_odf(original):
             raise ValueError("Neplatný dokument OpenDocument.")
         names = original.namelist()
-        if len(names) != len(set(names)) or sum(entry.file_size for entry in original.infolist()) > 150_000_000:
+        if len(names) != len(set(names)) or sum(entry.file_size for entry in original.infolist()) > 1_000_000_000:
             raise ValueError("Dokument OpenDocument je poškozený nebo příliš velký.")
         if any(UNSUPPORTED.match(name) for name in names):
             raise ValueError("Dokument obsahuje vložené objekty nebo makra. Odstraňte je před zpracováním.")

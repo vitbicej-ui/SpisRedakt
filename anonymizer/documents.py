@@ -129,32 +129,48 @@ def recognize_image(pixmap, tessdata):
         return text, boxes, matrix
 
 
+def blank(page):
+    """True for an empty page, such as the back of a scanned sheet."""
+    preview = page.get_pixmap(dpi=40, colorspace=pdf.csGRAY, annots=False, alpha=False)
+    dark = sum(1 for value in preview.samples if value < 160)
+    return dark <= 0.002 * preview.width * preview.height
+
+
 def redact_pdf(source, destination, rules, tessdata=None, force_ocr=False):
-    scale = pdf.Matrix(300 / 72, 300 / 72)
     expected = []
     with pdf.open(source) as original, pdf.open() as output:
-        if original.needs_pass or original.is_repaired or not len(original):
+        # A repaired cross-reference table is common in scanner output; every page
+        # is re-rendered anyway, so only password protection and emptiness stop it.
+        if original.needs_pass or not len(original):
             raise ValueError("PDF je šifrované, poškozené nebo prázdné.")
         for page in original:
-            if (page.rect * scale).irect.get_area() > MAX_PIXELS:
+            # Large drawings and posters are rendered below 300 DPI to fit the pixel limit.
+            dpi = min(300, int(72 * (MAX_PIXELS / max(page.rect.width * page.rect.height, 1)) ** 0.5))
+            if dpi < 50:
                 raise ValueError("Stránka přesahuje limit velikosti.")
+            scale = pdf.Matrix(dpi / 72, dpi / 72)
             pixmap = page.get_pixmap(matrix=scale, annots=False, alpha=False)
             raw = page.get_text("rawdict", flags=pdf.TEXTFLAGS_RAWDICT & ~pdf.TEXT_PRESERVE_IMAGES)
             text, boxes = text_geometry(raw)
             matrix = page.rotation_matrix * scale
             sources = [(text, boxes, matrix)]
+            blacked = False
             if force_ocr or page.get_image_info() or page.get_drawings() or not text.strip() or "\ufffd" in text:
                 recognized = recognize_image(pixmap, tessdata)
-                if not recognized[0].strip():
-                    raise ValueError("OCR nenašlo čitelný text. Stránku zkontrolujte ručně.")
-                sources.append(recognized)
+                if recognized[0].strip():
+                    sources.append(recognized)
+                elif not text.strip() and not blank(page):
+                    # A photo, signature or unreadable scan: OCR cannot rule out
+                    # personal data, so the whole page is blacked out.
+                    pixmap.clear_with(0)
+                    blacked = True
             combined = " ".join(content for content, _, _ in sources)
             folded = "".join(c for c in unicodedata.normalize("NFD", combined.casefold())
                              if not unicodedata.combining(c))
             if (re.search(r"regist(?:er|r[aeiu]?)\s+trestov", folded)
                     or ("priezvisko" in folded and re.search(r"narodenia|ziadatel", folded))):
                 raise ValueError("Slovenský výpis nebo formulář nebyl vydán: rozložení osobních polí zatím nelze spolehlivě ověřit.")
-            redacted = []
+            redacted = [pixmap.irect] if blacked else []
             for content, geometry, transform in sources:
                 redacted.extend(redact_geometry(pixmap, rules, content, geometry, transform))
             target = output.new_page(width=page.rect.width, height=page.rect.height)

@@ -3,7 +3,7 @@ import tempfile
 import os
 
 from .documents import redact_docx, redact_pdf
-from .formats import SUPPORTED, MAX_BYTES, FormatError, identify, output_suffix, redact_file
+from .formats import SUPPORTED, MAX_BYTES, LARGE_BYTES, LARGE_FORMATS, FormatError, identify, output_suffix, redact_file
 from .rules import Rules
 from .audit import Audit
 from .reasons import reason_code
@@ -41,10 +41,12 @@ def _process_folders(input_root, output_root, tessdata, audit, selected):
         collisions = 0
         try:
             with source.open("rb") as stream:
-                data = stream.read(MAX_BYTES + 1)
-            if len(data) > MAX_BYTES:
+                data = stream.read(LARGE_BYTES + 1)
+            if len(data) > LARGE_BYTES:
                 raise FormatError("size_limit", "Vstup překračuje limit velikosti.")
             suffix = identify(data, source.suffix.lower())
+            if len(data) > MAX_BYTES and suffix not in LARGE_FORMATS:
+                raise FormatError("size_limit", "Vstup překračuje limit velikosti.")
             if suffix is None and source.suffix.lower() in SUPPORTED:
                 raise FormatError("invalid_signature", "Obsah neodpovídá deklarovanému formátu.")
             if suffix not in SUPPORTED:

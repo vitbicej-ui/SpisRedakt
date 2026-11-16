@@ -847,6 +847,47 @@ class ProcessingTests(unittest.TestCase):
         self.assertEqual(reason_code(ValueError("OCR nenašlo čitelný text. Stránku zkontrolujte ručně.")),
                          "pdf_page_without_ocr_text")
 
+    @unittest.skipUnless(os.environ.get("SPISREDAKT_TEST_TESSDATA"), "Chybí testovací jazyková data.")
+    def test_pdf_scanner_quirks(self):
+        """Repaired cross-references, a blank back page, a photo page and an oversized drawing."""
+        from anonymizer.documents import redact_pdf
+
+        tessdata = os.environ["SPISREDAKT_TEST_TESSDATA"]
+        with pdf.open() as text_doc, pdf.open() as scan:
+            page = text_doc.new_page()
+            page.insert_text((72, 90), self.email, fontsize=22)
+            sheet = scan.new_page()
+            sheet.insert_image(sheet.rect, pixmap=page.get_pixmap(dpi=200))
+            white = pdf.Pixmap(pdf.csRGB, pdf.IRect(0, 0, 400, 560), False)
+            white.clear_with(255)
+            scan.new_page().insert_image(pdf.Rect(0, 0, 595, 842), pixmap=white)
+            photo = pdf.Pixmap(pdf.csRGB, pdf.IRect(0, 0, 400, 560), False)
+            photo.clear_with(90)
+            scan.new_page().insert_image(pdf.Rect(0, 0, 595, 842), pixmap=photo)
+            data = scan.tobytes()
+        # Break the cross-reference offset; MuPDF repairs such files when opening them.
+        source = self.root / "sken.pdf"
+        source.write_bytes(data.replace(b"startxref\n", b"startxref\n9").replace(b"startxref\r\n", b"startxref\r\n9"))
+        with pdf.open(source) as check:
+            self.assertTrue(check.is_repaired)
+        target = self.root / "sken_out.pdf"
+        redact_pdf(source, target, Rules(), tessdata)
+        with pdf.open(target) as result:
+            self.assertEqual(len(result), 3)
+            pages = [pdf.Pixmap(result, page.get_images()[0][0]) for page in result]
+        self.assertGreater(pages[0].color_count(colors=True).get(b"\0\0\0", 0), 5_000)
+        self.assertEqual(set(pages[1].color_count(colors=True)), {b"\xff\xff\xff"})
+        self.assertEqual(set(pages[2].color_count(colors=True)), {b"\0\0\0"})
+
+        poster = self.root / "vykres.pdf"
+        with pdf.open() as doc:
+            doc.new_page(width=4000, height=4000).insert_text((72, 90), self.email, fontsize=40)
+            doc.save(poster)
+        redact_pdf(poster, self.root / "vykres_out.pdf", Rules(), tessdata)
+        with pdf.open(self.root / "vykres_out.pdf") as result:
+            image = pdf.Pixmap(result, result[0].get_images()[0][0])
+            self.assertLessEqual(image.width * image.height, 30_000_000)
+
     def test_case_law_citations_stay(self):
         rules = Rules()
         text = ("nikoliv však již dobu přesahující 12 let (srov. usnesení Krajského soudu v Brně ze dne "

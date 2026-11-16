@@ -481,7 +481,7 @@ def redact_office(source, destination, rules, tessdata=None):
             raise ValueError("Neplatný dokument Office.")
         if any(UNSUPPORTED.search(name) for name in names):
             raise ValueError("Soubor obsahuje nepodporované obrázky, přílohy, grafy, podpisy nebo externí data.")
-        if sum(entry.file_size for entry in original.infolist()) > 150_000_000:
+        if sum(entry.file_size for entry in original.infolist()) > 1_000_000_000:
             raise ValueError("Rozbalený dokument Office překračuje limit velikosti.")
         renamed, dropped = plan_package(original)
         columns = StructuredColumns(original, rules) if suffix == ".xlsx" else None
