@@ -780,6 +780,23 @@ class ProcessingTests(unittest.TestCase):
         for value in ("[OSOBA-1]", "[NAROZENI-1]", "[TELEFON-1]", "bez poznámky", f'xmlns="{SHEET}"'):
             self.assertIn(value, data)
 
+    def test_case_law_citations_stay(self):
+        rules = Rules()
+        text = ("nikoliv však již dobu přesahující 12 let (srov. usnesení Krajského soudu v Brně ze dne "
+                "26. 5. 2023, č. j. 70 Co 123/2023-45).\nV řešené věci byla exekuce vedena na základě usnesení "
+                "Okresního soudu v Uherském Hradišti ze dne 22. 3. 2010, č. j. 12 Nc 3456/2010-7, které nabylo "
+                "právní moci. Náhrada nepříslušela (mutatis mutandis usnesení Nejvyššího soudu ze dne 20. 12. 2016, "
+                "sp. zn. 20 Cdo 4567/2016). Dovolání (sp. zn. 26 Cdo 12/2024) bylo odmítnuto. Nejvyšší soud zrušil "
+                "usnesení Okresního soudu v Kroměříži ze dne 1. 2. 2020, č. j. 12 C 1/2020-5. Rozsudek Nejvyššího "
+                "soudu ze dne 1. 1. 2020, sp. zn. 21 Ko 5/2020. Návrh ze dne 3. 2. 2023, sp. zn. 120 EX 1234/10, "
+                "exekutor zamítl.")
+        result = rules.replace(text)[0]
+        for kept in ("70 Co 123/2023-45", "20 Cdo 4567/2016", "26 Cdo 12/2024", "21 Ko 5/2020"):
+            self.assertIn(kept, result)
+        for removed in ("12 Nc 3456/2010-7", "12 C 1/2020-5", "120 EX 1234/10"):
+            self.assertNotIn(removed, result)
+        self.assertIn("Hradišti ze dne 22. 3. 2010, č. j. [SPIS-", result)
+
     def test_initials(self):
         rules = Rules()
         lines = ["Žalobce Jan Novák podal žalobu.", "Rozsudek převzal J. Novák dne 3. 4.",

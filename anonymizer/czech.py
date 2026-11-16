@@ -103,6 +103,36 @@ ADDRESS = re.compile(rf"(?:{STREET}{SPACE}{NUMBER}(?:[ \t\n]*,[ \t\n]*(?:{POSTCO
 FREE_ADDRESS = re.compile(rf"(?<!\w)(?:{CITY}[ \t\n]*,[ \t\n]*(?:{CAP}|[A-Z]\.){SPACE}(?:{CAP}{SPACE})?{NUMBER}|{CITY}{SPACE}{NUMBER}[ \t\n]*,[ \t\n]*(?:{POSTCODE}{SPACE})?{CITY})(?=$|[\s,.;)])")
 BIRTH = re.compile(r"\b(?:nar(?:ozen(?:ý|á|ého|é|ému|ou)?)?\.?|datum[ \t\n]+narození|dat\.[ \t\n]*nar\.)[ \t\n]*:?[ \t\n]*(?:dne[ \t\n]+)?(\d{1,2})\.[ \t\n]*(\d{1,2})\.[ \t\n]*(\d{4})(?!\d)", re.I)
 CASE = re.compile(r"(?:sp\.[ \t\n]*zn\.|č\.[ \t\n]*j\.|spisová značka|číslo jednací)[ \t\n]*:?[ \t\n]*((?:\d{1,4}[ \t\n]+)?[A-ZČŘŠŽ][A-Za-zČŘŠŽčřšž]{0,7}[ \t\n]*\d{1,6}/\d{2,4}(?:-\d+)?)")
+# Case-law citations stay: they identify a public decision, not the parties.
+# A citation is recognised by a cue in the same sentence ("srov.", "viz",
+# "mutatis mutandis"), by an apex or European court, or by a register used
+# only by the Supreme, Supreme Administrative or Constitutional Court.
+CITATION_CUE = re.compile(
+    r"(?<!\w)(?:srov(?:\.|nej\w*)|viz|obdobně|shodně|mutatis[ \t\n]+mutandis|např\.|"
+    r"judikatur\w*|publikovan\w*|uveřejněn\w*|Sbír\w*[ \t\n]+soudních|rozhodovací\w*[ \t\n]+praxe)", re.I)
+APEX_COURT = re.compile(
+    r"Nejvyšší\w*[ \t\n]+(?:správní\w*[ \t\n]+)?soud\w*|Ústavní\w*[ \t\n]+soud\w*|(?<!\w)(?:NS|NSS|ÚS|SDEU|ESLP)(?!\w)|"
+    r"Soudní\w*[ \t\n]+dv(?:ůr|ora|oru|orem)|Evropsk\w+[ \t\n]+soud\w*", re.I)
+APEX_REGISTER = re.compile(
+    r"(?<![A-Za-z])(?:Cdo|Cdon|Odo|Odon|Tdo|Tz|Ntd|NSČR|ICdo|Afs|As|Ads|Azs|Ans|Aps|Ars|Ao|Komp|Kseo|Ksz|Pst|Vol)(?![A-Za-z])")
+ANY_COURT = re.compile(APEX_COURT.pattern + r"|(?:Okresní|Krajsk|Městsk|Obvodní|Vrchní)\w*[ \t\n]+soud\w*|exekutor\w*", re.I)
+SENTENCE_END = re.compile(r"[.!?;][ \t]*\n?[ \t]*(?=[A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ](?:[a-záčďéěíňóřšťúůýž]|[ \t]))|\n[ \t]*\n")
+
+
+def cited_decision(text, match):
+    if APEX_REGISTER.search(match[1]):
+        return True
+    window = text[max(0, match.start() - 300):match.start()]
+    ends = list(SENTENCE_END.finditer(window))
+    sentence = window[ends[-1].end():] if ends else window
+    if CITATION_CUE.search(sentence):
+        return True
+    # Without a cue, the court named closest before the number decides:
+    # "Nejvyšší soud zrušil usnesení Okresního soudu ..., č. j. ..." is redacted.
+    courts = list(ANY_COURT.finditer(sentence))
+    return bool(courts) and bool(APEX_COURT.fullmatch(courts[-1][0]))
+
+
 MONTHS = "ledna února března dubna května června července srpna září října listopadu prosince".split()
 BIRTH_TEXT = re.compile(BIRTH.pattern.replace(r"(\d{1,2})\.[ \t\n]*(\d{4})", "(" + "|".join(MONTHS) + rf"){SPACE}(\d{{4}})"), re.I)
 
@@ -125,7 +155,8 @@ def contextual_findings(text, known_surnames=()):
             end = match.start(2) + len(value)
             yield match.start(2), end, kind, structured_identity(kind, value)
     for match in CASE.finditer(text):
-        yield *match.span(1), "SPIS", match[1]
+        if not cited_decision(text, match):
+            yield *match.span(1), "SPIS", match[1]
     for pattern in (BIRTH, BIRTH_TEXT):
         for match in pattern.finditer(text):
             day, month, year = match.groups()
