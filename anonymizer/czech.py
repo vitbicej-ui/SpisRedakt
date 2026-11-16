@@ -169,6 +169,19 @@ def column_kind(header):
     return None
 
 
+def header_row(headers, columns, texts):
+    """Decide whether a table row with header-like cells starts new columns.
+
+    Once columns are known, a data value such as "OP" must not end redaction of
+    its row, so only rows made solely of headers (and blanks) qualify.
+    """
+    if not headers:
+        return False
+    if not columns:
+        return True
+    return sum(1 for text in texts if str(text).strip()) == len(headers)
+
+
 def structured_identity(kind, value):
     """Normalize a standalone cell value so equal values share one label."""
     text = " ".join(str(value).split())

@@ -319,6 +319,57 @@ class ProcessingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Vzorec"):
             redact_office(formula, self.root / "vzorec_out.xlsx", Rules())
 
+    def test_word_and_slide_tables_by_header(self):
+        from docx.shared import Pt
+        from anonymizer.office import DRAW, redact_office
+
+        document = Document()
+        table = document.add_table(rows=4, cols=4)
+        for cell, text in zip(table.rows[0].cells, ["Poznámka", "Jméno a příjmení", "Číslo OP", "Datum podpisu"]):
+            cell.text = text
+        values = [["bez poznámky", "Karolína Bílá", "AB123456", "3. 4. 2020"],
+                  ["", "Karolína Bílá", "OP", "3. 4. 2020"]]
+        for row, texts in zip(table.rows[1:], values):
+            for cell, text in zip(row.cells, texts):
+                cell.text = text
+        run = table.cell(1, 1).paragraphs[0].runs[0]
+        run.bold = True
+        run.font.size = Pt(13)
+        # Cells spanning two grid columns keep later columns aligned with their headers.
+        table.cell(3, 0).merge(table.cell(3, 1)).text = "Souhrn"
+        table.cell(3, 2).text = "AB999999"
+        source, target = self.root / "tabulka.docx", self.root / "tabulka_out.docx"
+        document.save(source)
+        redact_office(source, target, Rules())
+        result = Document(target).tables[0]
+        self.assertEqual([cell.text for cell in result.rows[1].cells],
+                         ["bez poznámky", "[OSOBA-1]", "[DOKLAD-1]", "3. 4. 2020"])
+        self.assertEqual([cell.text for cell in result.rows[2].cells],
+                         ["", "[OSOBA-1]", "[DOKLAD-2]", "3. 4. 2020"])
+        self.assertEqual(result.cell(3, 0).text, "Souhrn")
+        self.assertEqual(result.cell(3, 2).text, "[DOKLAD-3]")
+        self.assertTrue(result.cell(1, 1).paragraphs[0].runs[0].bold)
+        self.assertEqual(result.cell(1, 1).paragraphs[0].runs[0].font.size, Pt(13))
+
+        slide = self.root / "snimek.pptx"
+        cell = '<a:tc{attr}><a:txBody><a:p><a:r><a:t>{text}</a:t></a:r></a:p></a:txBody></a:tc>'
+        rows = [["Poznámka", "", "Číslo OP"], ["Karolína", "", "XY777888"]]
+        xml = f'<slide xmlns:a="{DRAW}"><a:tbl>' + "".join(
+            "<a:tr>" + "".join(cell.format(attr="", text=text) for text in row) + "</a:tr>" for row in rows
+        ) + "<a:tr>" + cell.format(attr=' gridSpan="2"', text="Souhrn") + cell.format(attr=' hMerge="1"', text="")
+        xml += cell.format(attr="", text="XY608111") + "</a:tr></a:tbl></slide>"
+        with ZipFile(slide, "w") as archive:
+            archive.writestr("ppt/presentation.xml", "<root/>")
+            archive.writestr("ppt/slides/slide1.xml", xml)
+        redact_office(slide, self.root / "snimek_out.pptx", Rules())
+        with ZipFile(self.root / "snimek_out.pptx") as archive:
+            data = archive.read("ppt/slides/slide1.xml").decode()
+        self.assertIn("[DOKLAD-1]", data)
+        self.assertIn("[DOKLAD-2]", data)
+        self.assertNotIn("XY", data)
+        self.assertIn("Karolína", data)
+        self.assertIn("Souhrn", data)
+
     def test_table_columns_by_header(self):
         from anonymizer.formats import redact_text
 

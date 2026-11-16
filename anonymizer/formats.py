@@ -70,12 +70,12 @@ def transform(value, rules):
 
 def redact_table(rows, rules):
     """Redact a CSV-like table, labelling whole cells under a personal-data header."""
-    from .czech import column_kind
+    from .czech import column_kind, header_row
 
     columns = {}
     for row in rows:
         kinds = {index: kind for index, cell in enumerate(row) if (kind := column_kind(cell))}
-        if kinds:
+        if header_row(kinds, columns, row):
             columns.update(kinds)
             yield [transform(cell, rules) for cell in row]
             continue

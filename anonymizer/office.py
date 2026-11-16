@@ -6,7 +6,7 @@ from zipfile import ZipFile
 from lxml import etree
 import pymupdf as pdf
 
-from .czech import column_kind
+from .czech import column_kind, header_row
 from .documents import MAX_PIXELS, recognize_image, redact_geometry
 
 WORD = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -42,13 +42,14 @@ def column_index(reference):
     return index or None
 
 
-def sheet_cells(root):
-    """Yield (column, cell) in document order, honouring omitted references."""
+def sheet_rows(root):
+    """Yield rows as [(column, cell)], honouring omitted cell references."""
     for row in root.iter(f"{{{SHEET}}}row"):
-        column = 0
+        cells, column = [], 0
         for cell in row.iterchildren(f"{{{SHEET}}}c"):
             column = column_index(cell.get("r")) or column + 1
-            yield column, cell
+            cells.append((column, cell))
+        yield cells
 
 
 class StructuredColumns:
@@ -97,30 +98,34 @@ class StructuredColumns:
 
     def apply(self, root, modify=True):
         columns = {}
-        for column, cell in sheet_cells(root):
-            header = column_kind(self.text(cell)) if cell.get("t") in {"s", "inlineStr", "str"} else None
-            if header:
-                columns[column] = header
+        for cells in sheet_rows(root):
+            headers = {column: kind for column, cell in cells
+                       if cell.get("t") in {"s", "inlineStr", "str"} and (kind := column_kind(self.text(cell)))}
+            if header_row(headers, columns, [self.text(cell) for _, cell in cells]):
+                columns.update(headers)
                 continue
-            kind = columns.get(column)
-            if not kind or cell.get("t") in {"b", "e"}:
-                continue
-            if cell.find(f"{{{SHEET}}}f") is not None:
-                if self.text(cell).strip() or cell.get("t") == "str":
-                    raise ValueError("Vzorec ve sloupci s osobními údaji vyžaduje ruční kontrolu.")
-                continue
-            label = self.rules.cell(kind, self.value(cell, kind))
-            if not label:
-                continue
-            if cell.get("t") == "s":
-                self.shared_labels.setdefault(int(cell.find(f"{{{SHEET}}}v").text), label)
-            elif modify:
-                for child in list(cell):
-                    if etree.QName(child).localname in {"v", "is"}:
-                        cell.remove(child)
-                cell.set("t", "inlineStr")
-                inline = etree.SubElement(cell, f"{{{SHEET}}}is")
-                etree.SubElement(inline, f"{{{SHEET}}}t").text = label
+            for column, cell in cells:
+                self.label_cell(cell, columns.get(column), modify)
+
+    def label_cell(self, cell, kind, modify):
+        if not kind or cell.get("t") in {"b", "e"}:
+            return
+        if cell.find(f"{{{SHEET}}}f") is not None:
+            if self.text(cell).strip() or cell.get("t") == "str":
+                raise ValueError("Vzorec ve sloupci s osobními údaji vyžaduje ruční kontrolu.")
+            return
+        label = self.rules.cell(kind, self.value(cell, kind))
+        if not label:
+            return
+        if cell.get("t") == "s":
+            self.shared_labels.setdefault(int(cell.find(f"{{{SHEET}}}v").text), label)
+        elif modify:
+            for child in list(cell):
+                if etree.QName(child).localname in {"v", "is"}:
+                    cell.remove(child)
+            cell.set("t", "inlineStr")
+            inline = etree.SubElement(cell, f"{{{SHEET}}}is")
+            etree.SubElement(inline, f"{{{SHEET}}}t").text = label
 
     def redact_shared(self, root):
         for index, item in enumerate(root.iterchildren(f"{{{SHEET}}}si")):
@@ -128,6 +133,40 @@ class StructuredColumns:
                 for child in list(item):
                     item.remove(child)
                 etree.SubElement(item, f"{{{SHEET}}}t").text = self.shared_labels[index]
+
+
+def redact_tables(root, rules):
+    """Label whole Word and PowerPoint table cells under a personal-data header."""
+    for namespace in (WORD, DRAW):
+        table_tag = f"{{{namespace}}}tbl"
+        for table in root.iter(table_tag):
+            columns = {}
+            for row in table.iterchildren(f"{{{namespace}}}tr"):
+                cells, column = [], 0
+                for cell in row.iterchildren(f"{{{namespace}}}tc"):
+                    if namespace == WORD:
+                        span = cell.find(f"{{{WORD}}}tcPr/{{{WORD}}}gridSpan")
+                        width = span.get(f"{{{WORD}}}val") if span is not None else None
+                    else:
+                        # DrawingML keeps an hMerge placeholder for every spanned column.
+                        width = None
+                        if cell.get("hMerge") in {"1", "true"}:
+                            column += 1
+                            continue
+                    nodes = [node for node in cell.iter(f"{{{namespace}}}t")
+                             if next(node.iterancestors(table_tag), None) is table]
+                    cells.append((column, nodes, "".join(node.text or "" for node in nodes)))
+                    column += int(width) if width and width.isdecimal() else 1
+                headers = {column: kind for column, _, text in cells if (kind := column_kind(text))}
+                if header_row(headers, columns, [text for _, _, text in cells]):
+                    columns.update(headers)
+                    continue
+                for column, nodes, text in cells:
+                    label = rules.cell(columns[column], text) if column in columns else None
+                    if label:
+                        # The first run keeps its formatting; the rest of the cell is emptied.
+                        for index, node in enumerate(nodes):
+                            node.text = label if index == 0 else ""
 
 
 def stripped_part(name):
@@ -278,6 +317,8 @@ def redact_office(source, destination, rules, tessdata=None):
                         columns.redact_shared(root)
                     elif columns and WORKSHEET.fullmatch(name):
                         columns.apply(root)
+                    elif suffix != ".xlsx":
+                        redact_tables(root, rules)
                     for nodes in office_blocks(root, suffix):
                         redact_nodes(nodes, rules)
                     for node in root.iter():
