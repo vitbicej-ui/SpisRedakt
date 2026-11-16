@@ -10,7 +10,7 @@ CAP = rf"[{UPPER}][a-záčďéěíňóřšťúůýž]+"
 NAME_WORD = rf"(?:{CAP}|[{UPPER}]{{2,}})"
 NAME = re.compile(rf"\b(?=(({NAME_WORD}){SPACE}({NAME_WORD}(?:-{NAME_WORD})*)(?![\w-])))")
 TITLE = re.compile(r"(?:JUDr|MUDr|PhDr|Mgr|Ing|Bc|Dr)\.[ \t\n]*$", re.I)
-PERSON_CONTEXT = re.compile(r"\b(?:dědic\w*|účastník\w*|klient\w*|notář\w*|pan(?:a|em|u|í|ovi)?|svědk\w*|svědek|pozůstalost\w* po|zastoupen\w*|podepsal[ay]?)\s*:?\s+$", re.I)
+PERSON_CONTEXT = re.compile(r"\b(?:dědic\w*|účastník\w*|klient\w*|notář\w*|pan(?:a|em|u|í|ovi)?|svědk\w*|svědek|žalob\w*|žalovan\w*|obžalovan\w*|obviněn\w*|poškozen\w*|advokát\w*|zástupc\w*|manžel\w*|pozůstalost\w* po|zastoupen\w*|podepsal[ay]?)\s*:?\s+$", re.I)
 PERSON_AFTER = re.compile(r"\s*,?\s*(?:nar\.|narozen\w*|bytem\b|zemřel\w*\b|podepsal\w*\b)", re.I)
 
 # Capitalised words that start form labels or headings, never part of a name
@@ -113,7 +113,7 @@ def address_identity(value):
     return ", ".join(sorted(" ".join(part.split()) for part in parts))
 
 
-def contextual_findings(text):
+def contextual_findings(text, known_surnames=()):
     for match in COMPANY.finditer(text):
         yield *match.span(1), "ORGANIZACE", match[1]
     for match in SLOVAK_FIELD.finditer(text):
@@ -142,6 +142,7 @@ def contextual_findings(text):
     for match in FREE_ADDRESS.finditer(text):
         yield *match.span(), "ADRESA", address_identity(match[0])
     end = 0
+    surnames = set()
     for match in NAME.finditer(text):
         if match.start() < end:
             continue
@@ -151,7 +152,40 @@ def contextual_findings(text):
         if (match[2].casefold() in GIVEN or TITLE.search(before)
                 or PERSON_CONTEXT.search(before) or PERSON_AFTER.match(text, match.end(1))):
             end = match.end(1)
-            yield *match.span(1), "OSOBA", name_identity(match[2], match[3])
+            identity = name_identity(match[2], match[3])
+            surnames.add(identity.split(" ", 1)[1])
+            yield *match.span(1), "OSOBA", identity
+    yield from initial_findings(text, surnames | set(known_surnames))
+
+
+INITIALS = rf"(?:[{UPPER}]\.[ \t]?){{1,2}}"
+SURNAME = rf"{NAME_WORD}(?:-{NAME_WORD})*"
+INITIAL_FIRST = re.compile(rf"(?<![\w.])({INITIALS})[ \t]*({SURNAME})(?![\w-])")
+INITIAL_LAST = re.compile(rf"(?<![\w.])({SURNAME})[ \t]+({INITIALS})(?=$|[\s,;)])", re.M)
+
+
+def initial_identity(initials, last):
+    """Identity such as "j. novák"; Rules links it to a unique full name."""
+    letters = " ".join(letter.casefold() + "." for letter in re.findall(rf"[{UPPER}]", initials))
+    feminine = last.casefold().endswith(("ová", "ové", "ovou", "ovými", "á"))
+    surname = "-".join(surname_stem(part, feminine) for part in last.casefold().split("-"))
+    return f"{letters} {surname}"
+
+
+def initial_findings(text, known):
+    """Find "J. Novák", "JUDr. K. Bílá" or "Novák J." when the context marks a person."""
+    for pattern, initials_group, surname_group in ((INITIAL_FIRST, 1, 2), (INITIAL_LAST, 2, 1)):
+        for match in pattern.finditer(text):
+            last = match[surname_group]
+            if last.split("-")[0].casefold() in NAME_STOP or last.casefold() in GIVEN:
+                continue
+            identity = initial_identity(match[initials_group], last)
+            before = text[max(0, match.start() - 100):match.start()]
+            if (identity.rsplit(" ", 1)[1] in known or last.casefold().endswith(("ová", "ové", "ovou"))
+                    or TITLE.search(before) or PERSON_CONTEXT.search(before)
+                    or PERSON_AFTER.match(text, match.end())):
+                end = match.end() if surname_group == 1 else match.end(surname_group)
+                yield match.start(), end, "OSOBA", identity
 
 
 COMPANY = re.compile(

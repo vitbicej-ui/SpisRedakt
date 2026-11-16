@@ -432,6 +432,22 @@ class ProcessingTests(unittest.TestCase):
                                "[OSOBA-3], [OSOBA-2] zastupuje [OSOBA-1]. Věc projednal Okresní soud v Praze.")
         self.assertEqual(count, 6)
 
+    def test_initials(self):
+        rules = Rules()
+        lines = ["Žalobce Jan Novák podal žalobu.", "Rozsudek převzal J. Novák dne 3. 4.",
+                 "Podle Nováka J. je věc jasná.", "Zástupce: JUDr. K. Bílá, advokátka",
+                 "Podepsala M. Dvořáková.", "Svědek P. Horák, nar. 1. 1. 1970, uvedl",
+                 "A. Úvod", "Č. Budějovice", "Viz bod B. Smlouvy"]
+        self.assertEqual([rules.replace(line)[0] for line in lines], [
+            "Žalobce [OSOBA-1] podal žalobu.", "Rozsudek převzal [OSOBA-1] dne 3. 4.",
+            "Podle [OSOBA-1] je věc jasná.", "Zástupce: JUDr. [OSOBA-2], advokátka",
+            "Podepsala [OSOBA-3].", "Svědek [OSOBA-4], nar. [NAROZENI-1], uvedl",
+            "A. Úvod", "Č. Budějovice", "Viz bod B. Smlouvy"])
+        # Two known people with the same surname and initial: no guess, a separate label.
+        rules = Rules()
+        rules.replace("Jan Novák a Josef Novák")
+        self.assertEqual(rules.replace("Podepsal J. Novák.")[0], "Podepsal [OSOBA-3].")
+
     def test_table_columns_by_header(self):
         from anonymizer.formats import redact_text
 

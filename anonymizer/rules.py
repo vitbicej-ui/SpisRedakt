@@ -34,6 +34,7 @@ class Rules:
     def __init__(self, alias_lines=()):
         self.aliases = {}
         self.labels = {}
+        self.surnames = set()
         self.counts = Counter()
         patterns = []
         for line in alias_lines:
@@ -49,7 +50,7 @@ class Rules:
 
     def find(self, text):
         candidates = [Finding(start, end, kind, key(identity))
-                      for start, end, kind, identity in contextual_findings(text)]
+                      for start, end, kind, identity in contextual_findings(text, self.surnames)]
         if self.custom:
             for match in self.custom.finditer(text):
                 variant = self.variants[match.lastindex - 1]
@@ -76,6 +77,18 @@ class Rules:
 
     def label(self, item):
         identity = (item.kind, item.identity)
+        if item.kind == "OSOBA" and identity not in self.labels:
+            initials = re.fullmatch(r"((?:\w\. ?)+) (\S+)", item.identity)
+            if initials:
+                # "J. Novák" reuses the label of the only known "Jan Novák".
+                first = initials[1][0]
+                matches = {label for (kind, known), label in self.labels.items()
+                           if kind == "OSOBA" and not re.match(r"\w\.", known)
+                           and known.startswith(first) and known.split(" ", 1)[-1] == initials[2]}
+                if len(matches) == 1:
+                    self.labels[identity] = matches.pop()
+            else:
+                self.surnames.add(item.identity.split(" ", 1)[-1])
         if identity not in self.labels:
             self.counts[item.kind] += 1
             self.labels[identity] = f"[{item.kind}-{self.counts[item.kind]}]"
