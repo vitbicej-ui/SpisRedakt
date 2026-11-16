@@ -6,7 +6,7 @@ from zipfile import ZipFile
 from lxml import etree
 import pymupdf as pdf
 
-from .czech import column_kind, header_row
+from .czech import plan_table
 from .documents import MAX_PIXELS, recognize_image, redact_geometry
 
 WORD = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -97,15 +97,10 @@ class StructuredColumns:
         return text
 
     def apply(self, root, modify=True):
-        columns = {}
-        for cells in sheet_rows(root):
-            headers = {column: kind for column, cell in cells
-                       if cell.get("t") in {"s", "inlineStr", "str"} and (kind := column_kind(self.text(cell)))}
-            if header_row(headers, columns, [self.text(cell) for _, cell in cells]):
-                columns.update(headers)
-                continue
-            for column, cell in cells:
-                self.label_cell(cell, columns.get(column), modify)
+        rows = list(sheet_rows(root))
+        plan = plan_table([[(column, self.text(cell)) for column, cell in cells] for cells in rows])
+        for (index, i), kind in plan.items():
+            self.label_cell(rows[index][i][1], kind, modify)
 
     def label_cell(self, cell, kind, modify):
         if not kind or cell.get("t") in {"b", "e"}:
@@ -140,7 +135,7 @@ def redact_tables(root, rules):
     for namespace in (WORD, DRAW):
         table_tag = f"{{{namespace}}}tbl"
         for table in root.iter(table_tag):
-            columns = {}
+            rows = []
             for row in table.iterchildren(f"{{{namespace}}}tr"):
                 cells, column = [], 0
                 for cell in row.iterchildren(f"{{{namespace}}}tc"):
@@ -157,16 +152,15 @@ def redact_tables(root, rules):
                              if next(node.iterancestors(table_tag), None) is table]
                     cells.append((column, nodes, "".join(node.text or "" for node in nodes)))
                     column += int(width) if width and width.isdecimal() else 1
-                headers = {column: kind for column, _, text in cells if (kind := column_kind(text))}
-                if header_row(headers, columns, [text for _, _, text in cells]):
-                    columns.update(headers)
-                    continue
-                for column, nodes, text in cells:
-                    label = rules.cell(columns[column], text) if column in columns else None
-                    if label:
-                        # The first run keeps its formatting; the rest of the cell is emptied.
-                        for index, node in enumerate(nodes):
-                            node.text = label if index == 0 else ""
+                rows.append(cells)
+            plan = plan_table([[(column, text) for column, _, text in cells] for cells in rows])
+            for (index, i), kind in plan.items():
+                _, nodes, text = rows[index][i]
+                label = rules.cell(kind, text)
+                if label:
+                    # The first run keeps its formatting; the rest of the cell is emptied.
+                    for position, node in enumerate(nodes):
+                        node.text = label if position == 0 else ""
 
 
 def stripped_part(name):

@@ -11,6 +11,11 @@ TITLE = re.compile(r"(?:JUDr|MUDr|PhDr|Mgr|Ing|Bc|Dr)\.[ \t\n]*$", re.I)
 PERSON_CONTEXT = re.compile(r"\b(?:dědic\w*|účastník\w*|klient\w*|notář\w*|pan(?:a|em|u|í|ovi)?|svědk\w*|svědek|pozůstalost\w* po|zastoupen\w*|podepsal[ay]?)\s*:?\s+$", re.I)
 PERSON_AFTER = re.compile(r"\s*,?\s*(?:nar\.|narozen\w*|bytem\b|zemřel\w*\b|podepsal\w*\b)", re.I)
 
+# Capitalised words that start form labels or headings, never part of a name
+# ("Karolína Bílá\nDatum narození" must not yield the person "Bílá Datum").
+NAME_STOP = set("""datum místo rodné rodný číslo jméno příjmení adresa bydliště trvalý trvalé
+telefon mobil státní státní pohlaví podpis razítko poznámka účet doklad""".split())
+
 # Explicit paradigms cover ambiguous given names whose cases cannot be recovered
 # reliably by cutting suffixes (e.g. Petr / Petra / Petrem).
 GIVEN = {}
@@ -104,6 +109,12 @@ def contextual_findings(text):
         yield *match.span(1), "ORGANIZACE", match[1]
     for match in SLOVAK_FIELD.finditer(text):
         yield *match.span(1), "OSOBNI_UDAJ", match[1]
+    for match in FORM_FIELD.finditer(text):
+        kind = column_kind(match[1])
+        value = match[2].rstrip(" \t.")
+        if kind and plausible_value(kind, value):
+            end = match.start(2) + len(value)
+            yield match.start(2), end, kind, structured_identity(kind, value)
     for match in CASE.finditer(text):
         yield *match.span(1), "SPIS", match[1]
     for pattern in (BIRTH, BIRTH_TEXT):
@@ -124,6 +135,8 @@ def contextual_findings(text):
     end = 0
     for match in NAME.finditer(text):
         if match.start() < end:
+            continue
+        if match[2].casefold() in NAME_STOP or match[3].split("-")[0].casefold() in NAME_STOP:
             continue
         before = text[max(0, match.start() - 100):match.start()]
         if (match[2].casefold() in GIVEN or TITLE.search(before)
@@ -158,6 +171,12 @@ COLUMN_HEADERS = [(kind, re.compile(pattern, re.I)) for kind, pattern in (
     ("OSOBA", r"jméno(?:[ ]+a[ ]+příjmení)?|příjmení(?:[ ]+a[ ]+jméno)?|celé[ ]+jméno|(?:jméno[ ]+)?(?:účastník|dědic|svědek|zákonný[ ]+zástupce)"),
 )]
 LABEL = re.compile(r"\[[A-Z_]+-\d+\]")
+# "Label: value" at the start of a line or after a semicolon, e.g. in forms
+# flattened to text. Names stop at a comma; addresses keep theirs.
+FORM_FIELD = re.compile(
+    r"(?:^|;)[ \t]*(" + "|".join(f"(?:{pattern.pattern})" for kind, pattern in COLUMN_HEADERS) +
+    r")[ \t]*:[ \t]*(?!\[[A-Z_]+-\d+\])([^\n;]+?)(?=[ \t]*(?:$|;|\n))", re.I | re.M,
+)
 
 
 def column_kind(header):
@@ -180,6 +199,77 @@ def header_row(headers, columns, texts):
     if not columns:
         return True
     return sum(1 for text in texts if str(text).strip()) == len(headers)
+
+
+def plausible_value(kind, text):
+    """Check that a cell beside "Label:" looks like a value, not another heading."""
+    text = str(text).strip()
+    if text.endswith(":"):
+        return False
+    if kind == "EMAIL":
+        return "@" in text
+    if kind == "OSOBA":
+        return len(text.split()) >= 2
+    return any(character.isdigit() for character in text)
+
+
+def plan_table(rows):
+    """Choose whole table cells to label from header cells.
+
+    ``rows`` holds ``[(column, text), ...]`` per row; the result maps
+    ``(row index, cell index)`` to a finding kind. Two layouts are recognised:
+
+    * columns, where a header row such as "Jméno | Telefon" covers the cells below;
+    * forms, where a header cell such as "Rodné číslo:" labels the next non-empty
+      cell in its row. A trailing colon marks a form pair in any table; a table
+      whose rows are mostly such pairs is treated as a form even without colons.
+    """
+    kinds = [[column_kind(text) for _, text in row] for row in rows]
+
+    def pairs(index, colon_only):
+        row, found = rows[index], []
+        for left, kind in enumerate(kinds[index]):
+            if not kind or (colon_only and not str(row[left][1]).rstrip().endswith(":")):
+                continue
+            right = next((j for j in range(left + 1, len(row)) if str(row[j][1]).strip()), None)
+            if right is None or kinds[index][right]:
+                continue
+            if colon_only and not plausible_value(kind, row[right][1]):
+                continue
+            found.append((left, right, kind))
+        return found
+
+    filled = [index for index, row in enumerate(rows) if any(str(text).strip() for _, text in row)]
+    def form_row(index):
+        # Forms start their row with a label: "Jméno | Jan Novák | RČ | ...".
+        found = pairs(index, False)
+        first = next(i for i, (_, text) in enumerate(rows[index]) if str(text).strip())
+        return found and found[0][0] == first
+
+    form_rows = [index for index in filled if form_row(index)]
+    plan = {}
+    if form_rows and 2 * len(form_rows) >= len(filled) and (len(form_rows) >= 2 or len(filled) == 1):
+        for index in form_rows:
+            for _, right, kind in pairs(index, False):
+                plan[index, right] = kind
+        return plan
+    columns = {}
+    for index, row in enumerate(rows):
+        consumed = set()
+        for left, right, kind in pairs(index, True):
+            plan[index, right] = kind
+            consumed.update((left, right))
+        rest = [i for i in range(len(row)) if i not in consumed]
+        headers = {row[i][0]: kinds[index][i] for i in rest if kinds[index][i]}
+        if header_row(headers, columns, [row[i][1] for i in rest]):
+            columns.update(headers)
+            continue
+        for i in rest:
+            column, text = row[i]
+            # A header-like value ("OP", "Telefon") is not personal data itself.
+            if column in columns and str(text).strip() and not kinds[index][i]:
+                plan[index, i] = columns[column]
+    return plan
 
 
 def structured_identity(kind, value):

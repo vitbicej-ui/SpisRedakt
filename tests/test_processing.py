@@ -345,9 +345,9 @@ class ProcessingTests(unittest.TestCase):
         self.assertEqual([cell.text for cell in result.rows[1].cells],
                          ["bez poznámky", "[OSOBA-1]", "[DOKLAD-1]", "3. 4. 2020"])
         self.assertEqual([cell.text for cell in result.rows[2].cells],
-                         ["", "[OSOBA-1]", "[DOKLAD-2]", "3. 4. 2020"])
+                         ["", "[OSOBA-1]", "OP", "3. 4. 2020"])
         self.assertEqual(result.cell(3, 0).text, "Souhrn")
-        self.assertEqual(result.cell(3, 2).text, "[DOKLAD-3]")
+        self.assertEqual(result.cell(3, 2).text, "[DOKLAD-2]")
         self.assertTrue(result.cell(1, 1).paragraphs[0].runs[0].bold)
         self.assertEqual(result.cell(1, 1).paragraphs[0].runs[0].font.size, Pt(13))
 
@@ -369,6 +369,49 @@ class ProcessingTests(unittest.TestCase):
         self.assertNotIn("XY", data)
         self.assertIn("Karolína", data)
         self.assertIn("Souhrn", data)
+
+    def test_form_layouts(self):
+        from anonymizer.czech import plan_table
+
+        def plan(*rows):
+            return plan_table([list(enumerate(row)) for row in rows])
+
+        # A form table without colons: labels in the first column.
+        self.assertEqual(plan(["Jméno a příjmení", "Karolína Bílá"], ["Rodné číslo", "800101/1234"],
+                              ["Poznámka", "bez poznámky"]),
+                         {(0, 1): "OSOBA", (1, 1): "RC"})
+        # Two pairs in a row, with an empty spacer cell as in merged spreadsheet forms.
+        self.assertEqual(plan(["Jméno", "", "Karolína Bílá", "Telefon", "777 123 456"],
+                              ["Adresa", "", "Dlouhá 5, Praha", "E-mail", "kb@example.test"]),
+                         {(0, 2): "OSOBA", (0, 4): "TELEFON", (1, 2): "ADRESA", (1, 4): "EMAIL"})
+        # A single "Label:" row above a column table is labelled without breaking the columns.
+        self.assertEqual(plan(["Účastník:", "Karolína Bílá", ""], ["Jméno", "Telefon", "Poznámka"],
+                              ["Ota Hrubý", "608 111 222", "x"], ["Iva Malá", "", "y"]),
+                         {(0, 1): "OSOBA", (2, 0): "OSOBA", (2, 1): "TELEFON", (3, 0): "OSOBA"})
+        # Column headers are not mistaken for form pairs, with or without colons.
+        self.assertEqual(plan(["Datum narození:", "Datum podpisu", "Jméno", "Poznámka"],
+                              ["1. 2. 1980", "3. 4. 2020", "Ota Hrubý", "x"]),
+                         {(1, 0): "NAROZENI", (1, 2): "OSOBA"})
+
+        rules = Rules()
+        text = ("Jméno a příjmení: Karolína Bílá\nDatum narození: 1. 2. 1980\n"
+                "Adresa: Dlouhá 5, 110 00 Praha 1; Tel.: 777 123 456\nDatum podpisu: 3. 4. 2020\nJméno: Poznámka")
+        self.assertEqual(rules.replace(text)[0],
+                         "Jméno a příjmení: [OSOBA-1]\nDatum narození: [NAROZENI-1]\n"
+                         "Adresa: [ADRESA-1]; Tel.: [TELEFON-1]\nDatum podpisu: 3. 4. 2020\nJméno: Poznámka")
+
+        document = Document()
+        table = document.add_table(rows=2, cols=2)
+        for row, texts in zip(table.rows, [["Jméno", "Karolína Bílá"], ["Číslo OP", "XY777888"]]):
+            for cell, value in zip(row.cells, texts):
+                cell.text = value
+        source, target = self.root / "formular.docx", self.root / "formular_out.docx"
+        document.save(source)
+        from anonymizer.office import redact_office
+        redact_office(source, target, Rules())
+        result = Document(target).tables[0]
+        self.assertEqual([[cell.text for cell in row.cells] for row in result.rows],
+                         [["Jméno", "[OSOBA-1]"], ["Číslo OP", "[DOKLAD-1]"]])
 
     def test_table_columns_by_header(self):
         from anonymizer.formats import redact_text
