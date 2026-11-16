@@ -432,6 +432,62 @@ class ProcessingTests(unittest.TestCase):
                                "[OSOBA-3], [OSOBA-2] zastupuje [OSOBA-1]. Věc projednal Okresní soud v Praze.")
         self.assertEqual(count, 6)
 
+    @staticmethod
+    def write_tiff(path, pixmaps):
+        """Write an uncompressed multi-page greyscale TIFF without extra dependencies."""
+        import struct
+
+        data = bytearray(b"II*\0\0\0\0\0")
+        previous = 4
+        for pixmap in pixmaps:
+            pixels = pixmap.samples
+            offset = len(data)
+            data += pixels
+            if len(data) % 2:
+                data += b"\0"
+            entries = [(256, 4, pixmap.width), (257, 4, pixmap.height), (258, 3, 8), (259, 3, 1),
+                       (262, 3, 1), (273, 4, offset), (277, 3, 1), (278, 4, pixmap.height),
+                       (279, 4, len(pixels)), (282, 5, 0), (283, 5, 0), (296, 3, 2)]
+            rational = len(data) + 2 + 12 * len(entries) + 4
+            directory = len(data)
+            struct.pack_into("<I", data, previous, directory)
+            data += struct.pack("<H", len(entries))
+            for tag, kind, value in entries:
+                if kind == 5:
+                    value = rational
+                data += struct.pack("<HHI", tag, kind, 1) + (struct.pack("<HH", value, 0) if kind == 3
+                                                             else struct.pack("<I", value))
+            previous = len(data)
+            data += b"\0\0\0\0" + struct.pack("<II", 200, 1)
+        path.write_bytes(bytes(data))
+
+    @unittest.skipUnless(os.environ.get("SPISREDAKT_TEST_TESSDATA"), "Chybí testovací jazyková data.")
+    def test_tiff_scan_becomes_redacted_pdf(self):
+        pages = []
+        for text in (self.email, "Telefon 777 123 456"):
+            with pdf.open() as doc:
+                page = doc.new_page()
+                page.insert_text((72, 90), text, fontsize=22)
+                pages.append(page.get_pixmap(dpi=200, colorspace=pdf.csGRAY))
+        source, target = self.root / "input", self.root / "output"
+        source.mkdir()
+        target.mkdir()
+        self.write_tiff(source / "sken.tif", pages)
+        (source / "prejmenovany.bin").write_bytes((source / "sken.tif").read_bytes())
+        results = list(process_folders(source, target, tessdata=os.environ["SPISREDAKT_TEST_TESSDATA"]))
+        self.assertEqual(len(results), 2)
+        for original, output, reason in results:
+            self.assertIsNotNone(output, reason)
+            self.assertEqual(output.suffix, ".pdf")
+            with pdf.open(output) as result:
+                self.assertEqual(len(result), 2)
+                for page in result:
+                    self.assertEqual(page.get_text(), "")
+                    image = pdf.Pixmap(result, page.get_images()[0][0])
+                    self.assertGreater(image.color_count(colors=True).get(b"\0\0\0", 0), 5_000)
+                    remaining = recognize_image(image, os.environ["SPISREDAKT_TEST_TESSDATA"])[0]
+                    self.assertEqual(Rules().find(remaining), [], remaining)
+
     def test_initials(self):
         rules = Rules()
         lines = ["Žalobce Jan Novák podal žalobu.", "Rozsudek převzal J. Novák dne 3. 4.",

@@ -6,12 +6,21 @@ from zipfile import ZipFile, ZIP_DEFLATED
 
 from lxml import etree
 
+import pymupdf as pdf
+
 from .documents import redact_pdf
 from .office import BLOCKS, redact_office, redact_image
 
 TEXT = {".txt", ".csv", ".tsv", ".json", ".xml"}
 IMAGES = {".png", ".jpg", ".jpeg", ".bmp"}
-SUPPORTED = TEXT | IMAGES | BLOCKS.keys() | {".pdf", ".zip"}
+SCANS = {".tif", ".tiff"}
+SUPPORTED = TEXT | IMAGES | SCANS | BLOCKS.keys() | {".pdf", ".zip"}
+# Formats that cannot be written back safely are released in a related format.
+OUTPUT = {".tif": ".pdf", ".tiff": ".pdf"}
+
+
+def output_suffix(suffix):
+    return OUTPUT.get(suffix, suffix)
 MAX_BYTES = 40_000_000
 
 
@@ -24,7 +33,8 @@ class FormatError(ValueError):
 def identify(data, suffix):
     if data.startswith(b"%PDF-"):
         return ".pdf"
-    for signature, detected in ((b"\x89PNG\r\n\x1a\n", ".png"), (b"\xff\xd8\xff", ".jpg"), (b"BM", ".bmp")):
+    for signature, detected in ((b"\x89PNG\r\n\x1a\n", ".png"), (b"\xff\xd8\xff", ".jpg"), (b"BM", ".bmp"),
+                                (b"II*\x00", ".tif"), (b"MM\x00*", ".tif")):
         if data.startswith(signature):
             return detected
     if data.startswith((b"PK\x03\x04", b"PK\x05\x06")):
@@ -144,9 +154,26 @@ def redact_archive(data, rules, depth=0, budget=None):
     return output.getvalue()
 
 
+def redact_scan(source, destination, rules, tessdata):
+    """Redact a (multi-page) TIFF scan through the image-only PDF pipeline."""
+    with pdf.open(source, filetype="tiff") as scan:
+        if not scan.page_count or scan.page_count > 500:
+            raise FormatError("scan_pages", "Sken TIFF je prázdný nebo má příliš mnoho stran.")
+        converted = scan.convert_to_pdf()
+    staged = destination.with_name(destination.stem + "-scan.pdf")
+    try:
+        staged.write_bytes(converted)
+        # Scans always need OCR: there is no text layer to rely on.
+        redact_pdf(staged, destination, rules, tessdata, force_ocr=True)
+    finally:
+        staged.unlink(missing_ok=True)
+
+
 def redact_file(source, destination, suffix, rules, tessdata):
     if suffix == ".pdf":
         redact_pdf(source, destination, rules, tessdata)
+    elif suffix in SCANS:
+        redact_scan(source, destination, rules, tessdata)
     elif suffix in BLOCKS:
         redact_office(source, destination, rules, tessdata)
         with ZipFile(destination) as archive:

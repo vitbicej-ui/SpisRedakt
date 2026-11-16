@@ -32,6 +32,7 @@ Po každé dávce aplikace zobrazí cestu k vlastní složce s průběžným pro
 
 ## Rozsah zpracování
 
+- Skeny TIFF, i vícestránkové, se vydávají jako PDF z obrazů (`Sken.tif` → `Sken_anonymizovano.pdf`). Každá strana vždy prochází českým OCR a stejným začerněním a kontrolou jako PDF. TIFF se pozná i podle obsahu, pokud má jinou příponu.
 - Dávka přijímá TXT, CSV, TSV, JSON a XML, samostatné PNG, JPEG a BMP a ZIP s textovými soubory nebo vnořenými ZIP. XML s DTD a archivy s jinými položkami se nevydávají. Rozpoznání podle signatury funguje u PDF, ZIP, moderního Office a podporovaných obrázků. Textové formáty používají příponu.
 - Kontrola před zveřejněním znovu načte textové výstupy a ověří, že pravidla nenajdou další náhrady. U Office a ZIP ověřuje také čitelnost balíčku. Výsledek kontroly vypovídá o použitých pravidlech a zpracovaných vrstvách. Kontextově nepřímá identifikace a nerozpoznané údaje zůstávají možné.
 

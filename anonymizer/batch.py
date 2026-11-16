@@ -3,7 +3,7 @@ import tempfile
 import os
 
 from .documents import redact_docx, redact_pdf
-from .formats import SUPPORTED, MAX_BYTES, FormatError, identify, redact_file
+from .formats import SUPPORTED, MAX_BYTES, FormatError, identify, output_suffix, redact_file
 from .rules import Rules
 from .audit import Audit
 
@@ -54,12 +54,13 @@ def _process_folders(input_root, output_root, tessdata, audit, selected):
             phase = "prepare"
             directory = target_root.joinpath(*(safe_name(part, rules) for part in source.parent.relative_to(source_root).parts))
             stem = safe_name(source.stem, rules)
-            destination = directory / f"{stem}_anonymizovano{suffix}"
+            released = output_suffix(suffix)
+            destination = directory / f"{stem}_anonymizovano{released}"
             if not directory.resolve().is_relative_to(target_root):
                 raise ValueError("Výstupní podsložka odkazuje mimo výstupní složku.")
             directory.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix=".spisredakt-", dir=directory) as scratch:
-                temporary = Path(scratch) / ("output" + suffix)
+                temporary = Path(scratch) / ("output" + released)
                 phase = "redact_and_validate"
                 attempts = 1
                 if audit:
@@ -78,7 +79,7 @@ def _process_folders(input_root, output_root, tessdata, audit, selected):
                         break
                     except FileExistsError:
                         collisions += 1
-                        destination = directory / f"{stem}_anonymizovano_{collisions + 1}{suffix}"
+                        destination = directory / f"{stem}_anonymizovano_{collisions + 1}{released}"
         except Exception as error:
             if audit:
                 code = (error.code if isinstance(error, FormatError) else
