@@ -2,6 +2,8 @@
 import re
 from datetime import date
 
+from .names import generated
+
 SPACE = r"[ \t\n]+"
 UPPER = "A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ"
 CAP = rf"[{UPPER}][a-záčďéěíňóřšťúůýž]+"
@@ -54,9 +56,16 @@ for row in (
 ):
     forms = row.casefold().split()
     for form in forms:
-        GIVEN.setdefault(form, []).append(forms[0])
+        if forms[0] not in GIVEN.setdefault(form, []):
+            GIVEN[form].append(forms[0])
+
+for canonical, forms, feminine in generated():
+    for form in [canonical, *forms]:
+        if canonical not in GIVEN.setdefault(form, []):
+            GIVEN[form].append(canonical)
 
 FEMININE = set("anna jana eva petra marie lucie hana alena kateřina tereza veronika lenka barbora ivana jitka martina markéta eliška kristýna".split())
+FEMININE.update(canonical for canonical, _, feminine in generated() if feminine)
 FEMININE.update("václava šárka zuzana monika simona michaela dominika".split())
 
 

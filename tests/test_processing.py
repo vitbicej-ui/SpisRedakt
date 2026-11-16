@@ -413,6 +413,25 @@ class ProcessingTests(unittest.TestCase):
         self.assertEqual([[cell.text for cell in row.cells] for row in result.rows],
                          [["Jméno", "[OSOBA-1]"], ["Číslo OP", "[DOKLAD-1]"]])
 
+    def test_generated_given_names(self):
+        from anonymizer.names import female_forms, male_forms
+
+        self.assertEqual(male_forms("Hynek"), ["hynek", "hynka", "hynkovi", "hynku", "hynkem"])
+        self.assertEqual(male_forms("Leoš")[1:], ["leoše", "leošovi", "leoši", "leošem"])
+        self.assertIn("olze", female_forms("Olga"))
+        self.assertIn("karolíně", female_forms("Karolína"))
+        self.assertEqual(female_forms("Natálie"), ["natálie", "natálii", "natálií"])
+        self.assertEqual(female_forms("Dagmar"), ["dagmar"])
+
+        rules = Rules()
+        text, count = rules.replace("Smlouvu uzavřeli Karolína Bílá a Hynek Dvořák. Hynka Dvořáka zastupuje "
+                                    "Olga Kratochvílová, Bohumila Malého zastupuje Ivo Novák. "
+                                    "Věc projednal Okresní soud v Praze.")
+        # Labels are numbered from the end of the text; declined forms share a label.
+        self.assertEqual(text, "Smlouvu uzavřeli [OSOBA-5] a [OSOBA-4]. [OSOBA-4] zastupuje "
+                               "[OSOBA-3], [OSOBA-2] zastupuje [OSOBA-1]. Věc projednal Okresní soud v Praze.")
+        self.assertEqual(count, 6)
+
     def test_table_columns_by_header(self):
         from anonymizer.formats import redact_text
 
