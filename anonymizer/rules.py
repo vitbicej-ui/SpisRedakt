@@ -95,10 +95,16 @@ class Rules:
         return self.labels[identity]
 
     def replace(self, text):
-        findings = self.find(text)
-        for item in reversed(findings):
-            text = text[:item.start] + self.label(item) + text[item.end:]
-        return text, len(findings)
+        total = 0
+        # A replacement can expose a new match next to a label; repeat until stable.
+        for _ in range(3):
+            findings = self.find(text)
+            if not findings:
+                break
+            total += len(findings)
+            for item in reversed(findings):
+                text = text[:item.start] + self.label(item) + text[item.end:]
+        return text, total
 
     def cell(self, kind, value):
         """Label a whole table cell whose column header marks it as personal data."""

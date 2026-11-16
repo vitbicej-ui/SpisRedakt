@@ -6,6 +6,7 @@ from .documents import redact_docx, redact_pdf
 from .formats import SUPPORTED, MAX_BYTES, FormatError, identify, output_suffix, redact_file
 from .rules import Rules
 from .audit import Audit
+from .reasons import reason_code
 
 
 def process_folders(input_root, output_root, tessdata=None, audit_root=None, audit_ready=None, selected=None):
@@ -86,7 +87,8 @@ def _process_folders(input_root, output_root, tessdata, audit, selected):
                         "permission_denied" if isinstance(error, PermissionError) else
                         "validation_or_unsupported_feature" if isinstance(error, ValueError) else
                         "io_error" if isinstance(error, OSError) else "processing_error")
-                audit.record("failed", phase=phase, code=code, attempts=attempts, **fields)
+                reason = reason_code(error) if code == "validation_or_unsupported_feature" else None
+                audit.record("failed", phase=phase, code=code, reason=reason, attempts=attempts, **fields)
             reason = str(error) if isinstance(error, FormatError) or type(error) is ValueError else type(error).__name__
             yield source, None, reason
         else:

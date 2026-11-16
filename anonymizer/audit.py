@@ -14,6 +14,7 @@ class Audit:
         self.id = uuid4().hex
         self.counts = Counter()
         self.errors = Counter()
+        self.reasons = Counter()
         self.fallback = False
         self.backup = Path(tempfile.gettempdir()) / "SpisRedakt" / "audit" / self.id
         self.on_fallback = None
@@ -49,6 +50,8 @@ class Audit:
             self.counts[status] += 1
         if status == "failed":
             self.errors[fields["code"]] += 1
+            if fields.get("reason"):
+                self.reasons[fields["reason"]] += 1
 
     def append(self, line):
         with (self.path / "events.jsonl").open("a", encoding="utf-8") as stream:
@@ -58,11 +61,12 @@ class Audit:
 
     def finish(self, completed):
         self.record("completed" if completed else "interrupted", phase="batch",
-                    counts=self.counts, errors=self.errors)
+                    counts=self.counts, errors=self.errors, reasons=self.reasons)
         summary = "\n".join(f"{label}: {self.counts[key]}" for key, label in
                             (("released", "Vydáno"), ("failed", "Chyby"), ("skipped", "Přeskočeno")))
         (self.path / "souhrn.txt").write_text(
             f"SpisRedakt {VERSION} · {self.id}\n"
             + ("Dávka dokončena.\n" if completed else "Dávka přerušena.\n") + summary + "\n"
-            + "".join(f"{code}: {count}\n" for code, count in self.errors.items()),
+            + "".join(f"{code}: {count}\n" for code, count in self.errors.items())
+            + "".join(f"  důvod {reason}: {count}\n" for reason, count in sorted(self.reasons.items())),
             encoding="utf-8")

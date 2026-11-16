@@ -780,6 +780,73 @@ class ProcessingTests(unittest.TestCase):
         for value in ("[OSOBA-1]", "[NAROZENI-1]", "[TELEFON-1]", "bez poznámky", f'xmlns="{SHEET}"'):
             self.assertIn(value, data)
 
+    def test_word_from_office_template(self):
+        """Typical office document: template path, mail merge, co-authors, split fields, EMF logo."""
+        from anonymizer.office import redact_office
+        from anonymizer.reasons import reason_code
+
+        document = Document()
+        paragraph = document.add_paragraph("Kontakt: ")
+        source, target = self.root / "sablona.docx", self.root / "sablona_out.docx"
+        document.save(source)
+        relationship = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        patched = self.root / "sablona_patched.docx"
+        with ZipFile(source) as original, ZipFile(patched, "w") as archive:
+            for entry in original.infolist():
+                data = original.read(entry)
+                if entry.filename == "word/document.xml":
+                    field = (f'<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> HYPER'
+                             f'</w:instrText></w:r><w:r><w:instrText xml:space="preserve">LINK "mailto:kb@</w:instrText></w:r>'
+                             f'<w:r><w:instrText>example.test"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+                             f'<w:r><w:t>napište nám</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>'
+                             f'<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> MERGEFIELD '
+                             f'</w:instrText></w:r><w:r><w:instrText>"Karolína Bílá"</w:instrText></w:r>'
+                             f'<w:r><w:fldChar w:fldCharType="end"/></w:r>')
+                    marker = '<w:t xml:space="preserve">Kontakt: </w:t></w:r>'
+                    self.assertIn(marker, data.decode())
+                    data = data.decode().replace(marker, marker + field).encode()
+                elif entry.filename == "word/settings.xml":
+                    data = data.decode().replace("</w:settings>",
+                                                 f'<w:attachedTemplate xmlns:r="{relationship}" r:id="rIdTemplate"/>'
+                                                 '<w:mailMerge><w:query w:val="SELECT * FROM C:\\Users\\karolina.bila\\adresy.xlsx"/>'
+                                                 "</w:mailMerge></w:settings>").encode()
+                elif entry.filename == "word/_rels/document.xml.rels":
+                    data = data.decode().replace("</Relationships>",
+                                                 f'<Relationship Id="rIdLogo" Type="{relationship}/image" Target="media/image1.emf"/>'
+                                                 f'<Relationship Id="rIdPeople" Type="http://schemas.microsoft.com/office/2011/relationships/people" Target="people.xml"/>'
+                                                 "</Relationships>").encode()
+                elif entry.filename == "[Content_Types].xml":
+                    data = data.decode().replace("</Types>", '<Default Extension="emf" ContentType="image/x-emf"/>'
+                                                 '<Override PartName="/word/people.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.people+xml"/>'
+                                                 "</Types>").encode()
+                archive.writestr(entry, data)
+            archive.writestr("word/_rels/settings.xml.rels",
+                             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                             f'<Relationship Id="rIdTemplate" Type="{relationship}/attachedTemplate" '
+                             'Target="file:///C:\\Users\\karolina.bila\\AppData\\Roaming\\Microsoft\\Templates\\Normal.dotm" '
+                             'TargetMode="External"/></Relationships>')
+            archive.writestr("word/media/image1.emf", b"\x01\x00\x00\x00EMF")
+            archive.writestr("word/people.xml", '<w15:people xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml">'
+                             '<w15:person w15:author="Karolína Bílá"><w15:presenceInfo w15:providerId="AD" '
+                             'w15:userId="kb@example.test"/></w15:person></w15:people>')
+        redact_office(patched, target, Rules())
+        with ZipFile(target) as archive:
+            names = archive.namelist()
+            everything = b"".join(archive.read(name) for name in names)
+            self.assertIn("word/media/image1_emf.png", names)
+            self.assertNotIn("word/media/image1.emf", names)
+            self.assertNotIn("word/people.xml", names)
+            self.assertIn(b'Target="media/image1_emf.png"', archive.read("word/_rels/document.xml.rels"))
+            self.assertIn(b'Extension="png"', archive.read("[Content_Types].xml"))
+            self.assertNotIn(b"attachedTemplate", archive.read("word/settings.xml"))
+        for leaked in (b"karolina.bila", b"Karol\xc3\xadna", b"example.test", b"Normal.dotm", b"people.xml"):
+            self.assertNotIn(leaked, everything)
+        self.assertIn(b"https://example.invalid/", everything)
+        self.assertEqual(Document(target).paragraphs[0].text, "Kontakt: napište nám")
+        self.assertEqual(reason_code(ValueError("OCR nenašlo čitelný text. Stránku zkontrolujte ručně.")),
+                         "pdf_page_without_ocr_text")
+
     def test_case_law_citations_stay(self):
         rules = Rules()
         text = ("nikoliv však již dobu přesahující 12 let (srov. usnesení Krajského soudu v Brně ze dne "
