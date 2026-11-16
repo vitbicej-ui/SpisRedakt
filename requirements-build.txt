@@ -1,2 +1,4 @@
 -r requirements.txt
 pyinstaller==6.22.3
+# Only for generating synthetic XLS files in tests.
+xlwt==1.3.0

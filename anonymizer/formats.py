@@ -16,9 +16,10 @@ IMAGES = {".png", ".jpg", ".jpeg", ".bmp"}
 SCANS = {".tif", ".tiff"}
 ODF = {".odt", ".ods", ".odp"}
 MAIL = {".eml", ".msg"}
-SUPPORTED = TEXT | IMAGES | SCANS | ODF | MAIL | BLOCKS.keys() | {".pdf", ".zip", ".rtf"}
+LEGACY = {".doc": ".docx", ".xls": ".xlsx"}
+SUPPORTED = TEXT | IMAGES | SCANS | ODF | MAIL | LEGACY.keys() | BLOCKS.keys() | {".pdf", ".zip", ".rtf"}
 # Formats that cannot be written back safely are released in a related format.
-OUTPUT = {".tif": ".pdf", ".tiff": ".pdf", ".msg": ".eml"}
+OUTPUT = {".tif": ".pdf", ".tiff": ".pdf", ".msg": ".eml", **LEGACY}
 
 
 def output_suffix(suffix):
@@ -36,8 +37,7 @@ def identify(data, suffix):
     if data.startswith(b"%PDF-"):
         return ".pdf"
     if data.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
-        # OLE compound file; Outlook messages carry their properties in substg streams.
-        return ".msg" if b"_\x00_\x00s\x00u\x00b\x00s\x00t\x00g\x00" in data[:200_000] or suffix == ".msg" else None
+        return identify_ole(data)
     if suffix == ".eml":
         return suffix
     if data.startswith(b"{\\rtf"):
@@ -61,6 +61,24 @@ def identify(data, suffix):
         return ".zip"
     if suffix in TEXT:
         return suffix
+    return None
+
+
+def identify_ole(data):
+    """Tell Word, Excel and Outlook files apart by their compound-file streams."""
+    import olefile
+
+    try:
+        with olefile.OleFileIO(io.BytesIO(data)) as ole:
+            names = {"/".join(entry) for entry in ole.listdir()}
+    except OSError:
+        return None
+    if "WordDocument" in names:
+        return ".doc"
+    if "Workbook" in names or "Book" in names:
+        return ".xls"
+    if any(name.startswith("__substg1.0_") for name in names):
+        return ".msg"
     return None
 
 
@@ -195,6 +213,16 @@ def redact_file(source, destination, suffix, rules, tessdata):
         with ZipFile(destination) as archive:
             if archive.testzip() is not None or archive.namelist()[0] != "mimetype":
                 raise FormatError("corrupt_output", "Výstup OpenDocument nelze přečíst.")
+    elif suffix in LEGACY:
+        from .legacy import doc_to_docx, xls_to_xlsx
+
+        converted = (doc_to_docx if suffix == ".doc" else xls_to_xlsx)(source.read_bytes())
+        staged = destination.with_name(destination.stem + "-converted" + LEGACY[suffix])
+        try:
+            staged.write_bytes(converted)
+            redact_file(staged, destination, LEGACY[suffix], rules, tessdata)
+        finally:
+            staged.unlink(missing_ok=True)
     elif suffix in MAIL:
         from .mail import redact_eml, redact_msg
 

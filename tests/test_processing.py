@@ -714,6 +714,72 @@ class ProcessingTests(unittest.TestCase):
         attached = next(part for part in result.walk() if part.get_filename())
         self.assertEqual(attached.get_content(), "Jméno;Telefon\r\n[OSOBA-3];[TELEFON-2]\r\n".encode())
 
+    def test_legacy_word_and_excel(self):
+        import struct
+        from anonymizer.formats import identify, output_suffix, redact_file
+        from anonymizer.office import SHEET
+
+        main = ("Smlouva s Karolínou Bílou\r"
+                "Jméno\x07Telefon\x07\x07Xaver Blum\x07777 123 456\x07\x07"
+                "Pole \x13 HYPERLINK \"mailto:kb@example.test\" \x14odkaz\x15 a obrázek \x01\r")
+        header = "Zpracovala Karolína Bílá\r"
+        text = main + header
+        word = bytearray(1024)
+        struct.pack_into("<HHH", word, 0, 0xA5EC, 0xC1, 0)
+        struct.pack_into("<H", word, 0x0A, 0x0200)
+        struct.pack_into("<H", word, 32, 14)
+        struct.pack_into("<H", word, 62, 22)
+        struct.pack_into("<ii", word, 64 + 12, len(main), 0)
+        struct.pack_into("<i", word, 64 + 20, len(header))
+        struct.pack_into("<H", word, 152, 93)
+        plc = struct.pack("<II", 0, len(text)) + struct.pack("<HIH", 0, 1024, 0)
+        clx = b"\x02" + struct.pack("<I", len(plc)) + plc
+        struct.pack_into("<II", word, 154 + 33 * 8, 0, len(clx))
+        word += text.encode("utf-16-le")
+        doc = self.compound_file({"WordDocument": bytes(word), "1Table": clx})
+        self.assertEqual(identify(doc, ".bin"), ".doc")
+        self.assertEqual(output_suffix(".doc"), ".docx")
+        source, target = self.root / "stary.doc", self.root / "stary_out.docx"
+        source.write_bytes(doc)
+        redact_file(source, target, ".doc", Rules(), None)
+        result = Document(target)
+        paragraphs = [paragraph.text for paragraph in result.paragraphs]
+        self.assertEqual(paragraphs[0], "Smlouva s [OSOBA-2]")
+        self.assertEqual(paragraphs[1], "Pole odkaz a obrázek [OBRÁZEK VYNECHÁN]")
+        self.assertEqual(paragraphs[-1], "Zpracovala [OSOBA-2]")
+        self.assertEqual([[cell.text for cell in row.cells] for row in result.tables[0].rows],
+                         [["Jméno", "Telefon"], ["[OSOBA-1]", "[TELEFON-1]"]])
+        with ZipFile(target) as archive:
+            self.assertNotIn(b"example.test", archive.read("word/document.xml"))
+
+        try:
+            import xlwt
+        except ImportError:
+            self.skipTest("Pro vytvoření testovacího XLS chybí xlwt.")
+        from datetime import date
+        from io import BytesIO
+
+        book = xlwt.Workbook()
+        sheet = book.add_sheet("Seznam")
+        for column, value in enumerate(["Jméno", "Datum narození", "Telefon", "Poznámka"]):
+            sheet.write(0, column, value)
+        sheet.write(1, 0, "Xaver Blum")
+        sheet.write(1, 1, date(1980, 2, 1), xlwt.easyxf(num_format_str="DD.MM.YYYY"))
+        sheet.write(1, 2, 777123456)
+        sheet.write(1, 3, "bez poznámky")
+        stream = BytesIO()
+        book.save(stream)
+        self.assertEqual(identify(stream.getvalue(), ".bin"), ".xls")
+        source, target = self.root / "stary.xls", self.root / "stary_out.xlsx"
+        source.write_bytes(stream.getvalue())
+        redact_file(source, target, ".xls", Rules(), None)
+        with ZipFile(target) as archive:
+            data = archive.read("xl/worksheets/sheet1.xml").decode()
+        for value in ("Xaver", "29252", "777123456"):
+            self.assertNotIn(value, data)
+        for value in ("[OSOBA-1]", "[NAROZENI-1]", "[TELEFON-1]", "bez poznámky", f'xmlns="{SHEET}"'):
+            self.assertIn(value, data)
+
     def test_initials(self):
         rules = Rules()
         lines = ["Žalobce Jan Novák podal žalobu.", "Rozsudek převzal J. Novák dne 3. 4.",
