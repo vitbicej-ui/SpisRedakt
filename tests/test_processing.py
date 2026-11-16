@@ -560,6 +560,160 @@ class ProcessingTests(unittest.TestCase):
         self.assertIn('office:value-type="string"><text:p>[NAROZENI-1]</text:p>', result)
         self.assertIn("https://example.invalid/", result)
 
+    @staticmethod
+    def compound_file(streams):
+        """Build a minimal OLE compound file; ``streams`` maps "a/b" paths to bytes."""
+        import struct
+
+        tree = {"children": {}}
+        for path, data in streams.items():
+            node = tree
+            parts = path.split("/")
+            for part in parts[:-1]:
+                node = node["children"].setdefault(part, {"children": {}})
+            node["children"][parts[-1]] = {"data": data}
+        entries = []
+
+        def add(name, node, kind):
+            index = len(entries)
+            entries.append({"name": name, "kind": kind, "node": node, "child": 0xFFFFFFFF, "right": 0xFFFFFFFF})
+            previous = None
+            for child_name, child in node.get("children", {}).items():
+                child_index = add(child_name, child, 2 if "data" in child else 1)
+                if previous is None:
+                    entries[index]["child"] = child_index
+                else:
+                    entries[previous]["right"] = child_index
+                previous = child_index
+            return index
+
+        add("Root Entry", tree, 5)
+        sector, mini = 512, 64
+        # Streams below 4096 bytes live in the mini stream; the test data are all small.
+        ministream, minifat = b"", []
+        for entry in entries:
+            data = entry["node"].get("data")
+            if data is None:
+                entry["start"], entry["size"] = 0xFFFFFFFE, 0
+                continue
+            assert len(data) < 4096
+            count = max(1, -(-len(data) // mini))
+            first = len(ministream) // mini
+            minifat += [first + i + 1 for i in range(count - 1)] + [0xFFFFFFFE]
+            ministream += data.ljust(count * mini, b"\0")
+            entry["start"], entry["size"] = first, len(data)
+        directory_sectors = -(-len(entries) * 128 // sector)
+        minifat_sectors = max(1, -(-len(minifat) * 4 // sector))
+        stream_sectors = max(1, -(-len(ministream) // sector))
+        total = directory_sectors + minifat_sectors + stream_sectors
+        fat_sectors = 1
+        while -(-(total + fat_sectors) * 4 // sector) > fat_sectors:
+            fat_sectors += 1
+        fat = [0xFFFFFFFD] * fat_sectors
+        position = fat_sectors
+        layout = {}
+        for name, count in (("directory", directory_sectors), ("minifat", minifat_sectors),
+                            ("stream", stream_sectors)):
+            layout[name] = position
+            fat += [position + i + 1 for i in range(count - 1)] + [0xFFFFFFFE]
+            position += count
+        fat += [0xFFFFFFFF] * (fat_sectors * sector // 4 - len(fat))
+        entries[0]["start"], entries[0]["size"] = layout["stream"], len(ministream)
+        header = struct.pack("<8s16sHHHHH6sIIIIIIIII", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", b"\0" * 16, 0x3E, 3,
+                             0xFFFE, 9, 6, b"\0" * 6, 0, fat_sectors, layout["directory"], 0, 4096,
+                             layout["minifat"], minifat_sectors, 0xFFFFFFFE, 0)
+        header += b"".join(struct.pack("<I", i) for i in range(fat_sectors))
+        header += b"\xff" * (sector - len(header))
+        minifat += [0xFFFFFFFF] * (minifat_sectors * sector // 4 - len(minifat))
+        chunks = [b"".join(struct.pack("<I", value) for value in minifat),
+                  ministream.ljust(stream_sectors * sector, b"\0")]
+        directory = b""
+        for entry in entries:
+            name = (entry["name"] + "\0").encode("utf-16-le")
+            directory += struct.pack("<64sHBBIII16sIQQIQ", name, len(name), entry["kind"], 1, 0xFFFFFFFF,
+                                     entry["right"], entry["child"], b"\0" * 16, 0, 0, 0,
+                                     entry.get("start", 0xFFFFFFFE), entry.get("size", 0))
+        directory = directory.ljust(directory_sectors * sector, b"\0")
+        return header + b"".join(struct.pack("<I", value) for value in fat) + directory + b"".join(chunks)
+
+    def test_email_formats(self):
+        from email import policy
+        from email.message import EmailMessage
+        from email.parser import BytesParser
+        from anonymizer.formats import identify, redact_file
+
+        inner = EmailMessage()
+        inner["From"] = "Ota Hrubý <ota@example.test>"
+        inner["Subject"] = "Přeposlaná zpráva"
+        inner.set_content("Volejte 777 123 456.")
+        message = EmailMessage()
+        message["From"] = "Xaver Blum <xb@example.test>"
+        message["To"] = "Karolína Bílá <kb@example.test>, ota@example.test"
+        message["Subject"] = "Spis Karolíny Bílé"
+        message["Received"] = "from mail.example.test (10.0.0.1)"
+        message["Message-ID"] = "<abc@example.test>"
+        message.set_content("Dobrý den, Karolína Bílá, rodné číslo 800101/1234.")
+        message.add_alternative('<p>Dobrý den, <b>Karolína</b> Bílá. <a href="mailto:kb@example.test">napište</a>'
+                                '<img src="https://tracker.example.test/x.png"><script>alert(1)</script></p>',
+                                subtype="html")
+        message.make_mixed()
+        attachment = EmailMessage()
+        attachment.set_content(b"Kontakt kb@example.test", "text", "plain", disposition="attachment",
+                               filename="Karolína Bílá.txt")
+        message.attach(attachment)
+        wrapper = EmailMessage()
+        wrapper.set_content(inner)
+        message.attach(wrapper)
+        source, target = self.root / "posta.eml", self.root / "posta_out.eml"
+        source.write_bytes(message.as_bytes(policy=policy.SMTP))
+        self.assertEqual(identify(source.read_bytes(), ".eml"), ".eml")
+        redact_file(source, target, ".eml", Rules(), None)
+        output = target.read_bytes()
+        result = BytesParser(policy=policy.default).parsebytes(output)
+        for value in (b"Karol", b"Xaver", b"example.test", b"800101", b"10.0.0.1", b"tracker", b"<script"):
+            self.assertNotIn(value, output)
+        self.assertIsNone(result["Received"])
+        self.assertIsNone(result["Message-ID"])
+        self.assertEqual(str(result["From"]), '"[OSOBA-1]" <email-1@anonymizovano.invalid>')
+        self.assertEqual(str(result["To"]), '"[OSOBA-2]" <email-2@anonymizovano.invalid>, '
+                                            "email-3@anonymizovano.invalid")
+        parts = {}
+        for part in result.walk():
+            parts.setdefault(part.get_content_type(), part)
+        self.assertIn("[OSOBA-2], rodné číslo [RC-1].", parts["text/plain"].get_content())
+        self.assertIn("<b>[OSOBA-2]</b>.", parts["text/html"].get_content())
+        attached = [part for part in result.walk() if part.get_filename()]
+        self.assertEqual(attached[0].get_filename(), "priloha-0001.txt")
+        self.assertEqual(attached[0].get_content(), b"Kontakt [EMAIL-2]")
+        nested = next(part for part in result.walk() if part.get_content_type() == "message/rfc822")
+        self.assertIn("[TELEFON-1]", nested.get_content().get_content())
+
+        def utf16(text):
+            return text.encode("utf-16-le")
+
+        msg = self.compound_file({
+            "__substg1.0_0037001F": utf16("Spis Karolíny Bílé"),
+            "__substg1.0_0C1A001F": utf16("Xaver Blum"),
+            "__substg1.0_0C1F001F": utf16("xb@example.test"),
+            "__substg1.0_1000001F": utf16("Paní Karolína Bílá, tel. 777 123 456."),
+            "__recip_version1.0_#00000000/__substg1.0_3001001F": utf16("Karolína Bílá"),
+            "__recip_version1.0_#00000000/__substg1.0_3003001F": utf16("kb@example.test"),
+            "__attach_version1.0_#00000000/__substg1.0_3707001F": utf16("seznam.csv"),
+            "__attach_version1.0_#00000000/__substg1.0_37010102": "Jméno;Telefon\nOta Hrubý;608 111 222\n".encode(),
+        })
+        source, target = self.root / "zprava.msg", self.root / "zprava_out.eml"
+        source.write_bytes(msg)
+        self.assertEqual(identify(msg, ".bin"), ".msg")
+        redact_file(source, target, ".msg", Rules(), None)
+        output = target.read_bytes()
+        self.assertNotIn(b"example.test", output)
+        result = BytesParser(policy=policy.default).parsebytes(output)
+        self.assertEqual(str(result["To"]), '"[OSOBA-2]" <email-2@anonymizovano.invalid>')
+        body = next(part for part in result.walk() if part.get_content_type() == "text/plain")
+        self.assertEqual(body.get_content().strip(), "Paní [OSOBA-2], tel. [TELEFON-1].")
+        attached = next(part for part in result.walk() if part.get_filename())
+        self.assertEqual(attached.get_content(), "Jméno;Telefon\r\n[OSOBA-3];[TELEFON-2]\r\n".encode())
+
     def test_initials(self):
         rules = Rules()
         lines = ["Žalobce Jan Novák podal žalobu.", "Rozsudek převzal J. Novák dne 3. 4.",

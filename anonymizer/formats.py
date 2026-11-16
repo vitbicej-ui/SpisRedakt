@@ -15,9 +15,10 @@ TEXT = {".txt", ".csv", ".tsv", ".json", ".xml"}
 IMAGES = {".png", ".jpg", ".jpeg", ".bmp"}
 SCANS = {".tif", ".tiff"}
 ODF = {".odt", ".ods", ".odp"}
-SUPPORTED = TEXT | IMAGES | SCANS | ODF | BLOCKS.keys() | {".pdf", ".zip", ".rtf"}
+MAIL = {".eml", ".msg"}
+SUPPORTED = TEXT | IMAGES | SCANS | ODF | MAIL | BLOCKS.keys() | {".pdf", ".zip", ".rtf"}
 # Formats that cannot be written back safely are released in a related format.
-OUTPUT = {".tif": ".pdf", ".tiff": ".pdf"}
+OUTPUT = {".tif": ".pdf", ".tiff": ".pdf", ".msg": ".eml"}
 
 
 def output_suffix(suffix):
@@ -34,6 +35,11 @@ class FormatError(ValueError):
 def identify(data, suffix):
     if data.startswith(b"%PDF-"):
         return ".pdf"
+    if data.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        # OLE compound file; Outlook messages carry their properties in substg streams.
+        return ".msg" if b"_\x00_\x00s\x00u\x00b\x00s\x00t\x00g\x00" in data[:200_000] or suffix == ".msg" else None
+    if suffix == ".eml":
+        return suffix
     if data.startswith(b"{\\rtf"):
         return ".rtf"
     for signature, detected in ((b"\x89PNG\r\n\x1a\n", ".png"), (b"\xff\xd8\xff", ".jpg"), (b"BM", ".bmp"),
@@ -189,6 +195,13 @@ def redact_file(source, destination, suffix, rules, tessdata):
         with ZipFile(destination) as archive:
             if archive.testzip() is not None or archive.namelist()[0] != "mimetype":
                 raise FormatError("corrupt_output", "Výstup OpenDocument nelze přečíst.")
+    elif suffix in MAIL:
+        from .mail import redact_eml, redact_msg
+
+        redact = redact_eml if suffix == ".eml" else redact_msg
+        destination.write_bytes(redact(source.read_bytes(), rules, tessdata,
+                                       lambda data, name: redact_bytes(data, name, rules, tessdata),
+                                       redact_image))
     elif suffix == ".rtf":
         from .rtf import redact_rtf
 
@@ -214,3 +227,18 @@ def redact_file(source, destination, suffix, rules, tessdata):
             with ZipFile(destination) as archive:
                 if archive.testzip() is not None:
                     raise FormatError("corrupt_output", "Výstupní archiv nelze přečíst.")
+
+
+def redact_bytes(data, suffix, rules, tessdata, depth=0):
+    """Redact an embedded file (e-mail attachment); return its bytes and suffix."""
+    import tempfile
+
+    detected = identify(data, suffix)
+    if detected not in SUPPORTED:
+        raise FormatError("attachment_unsupported", "E-mail obsahuje přílohu v nepodporovaném formátu.")
+    with tempfile.TemporaryDirectory(prefix="SpisRedakt-attachment-") as folder:
+        source = Path(folder) / ("input" + detected)
+        target = Path(folder) / ("output" + output_suffix(detected))
+        source.write_bytes(data)
+        redact_file(source, target, detected, rules, tessdata)
+        return target.read_bytes(), output_suffix(detected)
