@@ -141,3 +141,52 @@ SLOVAK_FIELD = re.compile(
     r"štát narodenia|štátne občianstvo|číslo dokladu|rodné číslo|pohlavie|číslo žiadosti|kód RT)"
     r"[ \t]*:[ \t]*([^\n;]+?)(?=[ \t]{2,}\S|[ \t]*$|;)", re.I | re.M,
 )
+
+
+# Column headers whose cells hold one structured value each. Headers must match
+# completely, so "Datum podpisu" or "Poznámka k telefonu" stay untouched.
+COLUMN_HEADERS = [(kind, re.compile(pattern, re.I)) for kind, pattern in (
+    ("NAROZENI", r"(?:datum|dat\.)[ ]*(?:narození|nar\.?)|narozen[aáý]?|nar\.|datum a místo narození"),
+    ("RC", r"rodné[ ]+číslo|r\.?[ ]*č\.?"),
+    ("ICO", r"ičo?|identifikační[ ]+číslo(?:[ ]+osoby)?"),
+    ("DIC", r"dič|daňové[ ]+identifikační[ ]+číslo"),
+    ("DOKLAD", r"(?:číslo|č\.)[ ]*(?:op|pasu|dokladu(?:[ ]+totožnosti)?|občanského[ ]+průkazu)|op|doklad(?:[ ]+totožnosti)?"),
+    ("TELEFON", r"(?:mobilní[ ]+)?telefon(?:ní[ ]+číslo)?|tel\.?(?:[ ]*č\.)?|mobil"),
+    ("EMAIL", r"e-?mail(?:ová[ ]+adresa)?"),
+    ("UCET", r"(?:číslo[ ]+)?(?:bankovního[ ]+)?(?:účet|účtu)|bankovní[ ]+spojení|iban"),
+    ("ADRESA", r"(?:adresa(?:[ ]+(?:trvalého[ ]+)?(?:pobytu|bydliště))?|bydliště|trvalý[ ]+pobyt|bytem|doručovací[ ]+adresa)"),
+    ("OSOBA", r"jméno(?:[ ]+a[ ]+příjmení)?|příjmení(?:[ ]+a[ ]+jméno)?|celé[ ]+jméno|(?:jméno[ ]+)?(?:účastník|dědic|svědek|zákonný[ ]+zástupce)"),
+)]
+LABEL = re.compile(r"\[[A-Z_]+-\d+\]")
+
+
+def column_kind(header):
+    """Return the finding kind for a table column header, or None."""
+    text = " ".join(str(header).replace(" ", " ").split()).strip(" :*").casefold()
+    for kind, pattern in COLUMN_HEADERS:
+        if pattern.fullmatch(text):
+            return kind
+    return None
+
+
+def structured_identity(kind, value):
+    """Normalize a standalone cell value so equal values share one label."""
+    text = " ".join(str(value).split())
+    if kind == "NAROZENI":
+        match = re.fullmatch(r"(\d{1,2})\.[ ]*(\d{1,2})\.[ ]*(\d{4})", text)
+        if match:
+            try:
+                return date(int(match[3]), int(match[2]), int(match[1])).isoformat()
+            except ValueError:
+                pass
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            return text
+    if kind == "OSOBA":
+        words = text.split()
+        if len(words) == 2 and all(re.fullmatch(rf"{NAME_WORD}(?:-{NAME_WORD})*", word) for word in words):
+            return name_identity(*words)
+    if kind in {"RC", "TELEFON", "UCET", "ICO", "DIC", "IBAN"}:
+        text = re.sub(r"\s", "", text)
+        if kind == "TELEFON":
+            text = text.removeprefix("+420")
+    return text.casefold()

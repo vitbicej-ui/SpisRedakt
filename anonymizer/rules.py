@@ -2,7 +2,7 @@ import re
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
-from .czech import contextual_findings
+from .czech import LABEL, contextual_findings, structured_identity
 
 
 def key(value):
@@ -86,3 +86,10 @@ class Rules:
         for item in reversed(findings):
             text = text[:item.start] + self.label(item) + text[item.end:]
         return text, len(findings)
+
+    def cell(self, kind, value):
+        """Label a whole table cell whose column header marks it as personal data."""
+        text = str(value).strip()
+        if not text or LABEL.fullmatch(text):
+            return None
+        return self.label(Finding(0, len(text), kind, structured_identity(kind, text)))

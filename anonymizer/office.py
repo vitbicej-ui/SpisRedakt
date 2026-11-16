@@ -1,10 +1,12 @@
 """Redact supported Office XML parts while retaining their formatting."""
 import re
+from datetime import date, timedelta
 from zipfile import ZipFile
 
 from lxml import etree
 import pymupdf as pdf
 
+from .czech import column_kind
 from .documents import MAX_PIXELS, recognize_image, redact_geometry
 
 WORD = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -19,6 +21,113 @@ BLOCKS = {
 UNSUPPORTED = re.compile(r"(?:^|/)(?:embeddings|activeX|externalLinks|pivotCache|queryTables|threadedComments|diagrams|_xmlsignatures)(?:/|$)|vbaProject", re.I)
 MEDIA = re.compile(r"^(?:word|xl|ppt)/media/[^/]+\.(png|jpe?g|bmp)$", re.I)
 DISABLED_LINK = "https://example.invalid/"
+
+
+WORKSHEET = re.compile(r"xl/worksheets/[^/]+\.xml")
+
+
+def xml_root(data):
+    parser = etree.XMLParser(resolve_entities=False, no_network=True)
+    root = etree.fromstring(data, parser=parser)
+    if root.getroottree().docinfo.doctype:
+        raise ValueError("Dokument obsahuje nepodporované DTD.")
+    return root
+
+
+def column_index(reference):
+    letters = re.match(r"[A-Z]*", reference or "")[0]
+    index = 0
+    for letter in letters:
+        index = index * 26 + ord(letter) - 64
+    return index or None
+
+
+def sheet_cells(root):
+    """Yield (column, cell) in document order, honouring omitted references."""
+    for row in root.iter(f"{{{SHEET}}}row"):
+        column = 0
+        for cell in row.iterchildren(f"{{{SHEET}}}c"):
+            column = column_index(cell.get("r")) or column + 1
+            yield column, cell
+
+
+class StructuredColumns:
+    """Label whole spreadsheet cells in columns whose header names personal data."""
+
+    def __init__(self, original, rules):
+        self.rules = rules
+        self.shared = []
+        self.shared_labels = {}
+        names = set(original.namelist())
+        if "xl/sharedStrings.xml" in names:
+            root = xml_root(original.read("xl/sharedStrings.xml"))
+            self.shared = ["".join(node.text or "" for node in item.iter(f"{{{SHEET}}}t")
+                                   if not any(etree.QName(parent).localname == "rPh" for parent in node.iterancestors()))
+                           for item in root.iterchildren(f"{{{SHEET}}}si")]
+        workbook = xml_root(original.read("xl/workbook.xml"))
+        properties = workbook.find(f"{{{SHEET}}}workbookPr")
+        self.epoch = date(1904, 1, 1) if properties is not None and properties.get("date1904") in {"1", "true"} else date(1899, 12, 30)
+        # Plan shared strings first: their part can precede or follow the sheets.
+        for name in sorted(names):
+            if WORKSHEET.fullmatch(name):
+                self.apply(xml_root(original.read(name)), modify=False)
+
+    def text(self, cell):
+        kind = cell.get("t")
+        value = cell.find(f"{{{SHEET}}}v")
+        if kind == "s":
+            try:
+                return self.shared[int(value.text)]
+            except (AttributeError, IndexError, TypeError, ValueError):
+                return ""
+        if kind == "inlineStr":
+            return "".join(node.text or "" for node in cell.iter(f"{{{SHEET}}}t"))
+        return value.text if value is not None and value.text else ""
+
+    def value(self, cell, kind):
+        text = self.text(cell)
+        if kind == "NAROZENI" and cell.get("t") in {None, "n"}:
+            try:
+                serial = float(text)
+            except ValueError:
+                return text
+            if 0 < serial < 2_958_466 and serial.is_integer():
+                return (self.epoch + timedelta(days=int(serial))).isoformat()
+        return text
+
+    def apply(self, root, modify=True):
+        columns = {}
+        for column, cell in sheet_cells(root):
+            header = column_kind(self.text(cell)) if cell.get("t") in {"s", "inlineStr", "str"} else None
+            if header:
+                columns[column] = header
+                continue
+            kind = columns.get(column)
+            if not kind or cell.get("t") in {"b", "e"}:
+                continue
+            if cell.find(f"{{{SHEET}}}f") is not None:
+                if self.text(cell).strip() or cell.get("t") == "str":
+                    raise ValueError("Vzorec ve sloupci s osobními údaji vyžaduje ruční kontrolu.")
+                continue
+            label = self.rules.cell(kind, self.value(cell, kind))
+            if not label:
+                continue
+            if cell.get("t") == "s":
+                self.shared_labels.setdefault(int(cell.find(f"{{{SHEET}}}v").text), label)
+            elif modify:
+                for child in list(cell):
+                    if etree.QName(child).localname in {"v", "is"}:
+                        cell.remove(child)
+                cell.set("t", "inlineStr")
+                inline = etree.SubElement(cell, f"{{{SHEET}}}is")
+                etree.SubElement(inline, f"{{{SHEET}}}t").text = label
+
+    def redact_shared(self, root):
+        for index, item in enumerate(root.iterchildren(f"{{{SHEET}}}si")):
+            if index in self.shared_labels:
+                for child in list(item):
+                    item.remove(child)
+                etree.SubElement(item, f"{{{SHEET}}}t").text = self.shared_labels[index]
 
 
 def stripped_part(name):
@@ -132,6 +241,7 @@ def redact_office(source, destination, rules, tessdata=None):
             raise ValueError("Soubor obsahuje nepodporované obrázky, přílohy, grafy, podpisy nebo externí data.")
         if sum(entry.file_size for entry in original.infolist()) > 150_000_000:
             raise ValueError("Rozbalený dokument Office překračuje limit velikosti.")
+        columns = StructuredColumns(original, rules) if suffix == ".xlsx" else None
         for entry in original.infolist():
             name = entry.filename
             if stripped_part(name):
@@ -143,10 +253,7 @@ def redact_office(source, destination, rules, tessdata=None):
             elif "/media/" in name:
                 raise ValueError("Vložený obrázek má nepodporovaný formát.")
             elif name.endswith((".xml", ".rels", ".vml")):
-                parser = etree.XMLParser(resolve_entities=False, no_network=True)
-                root = etree.fromstring(data, parser=parser)
-                if root.getroottree().docinfo.doctype:
-                    raise ValueError("Dokument obsahuje nepodporované DTD.")
+                root = xml_root(data)
                 if name == "[Content_Types].xml" or name.endswith(".rels"):
                     for node in list(root):
                         part = (node.get("PartName") or node.get("Target") or "").removeprefix("../").lstrip("/")
@@ -167,6 +274,10 @@ def redact_office(source, destination, rules, tessdata=None):
                         }:
                             root.remove(node)
                 else:
+                    if columns and name == "xl/sharedStrings.xml":
+                        columns.redact_shared(root)
+                    elif columns and WORKSHEET.fullmatch(name):
+                        columns.apply(root)
                     for nodes in office_blocks(root, suffix):
                         redact_nodes(nodes, rules)
                     for node in root.iter():

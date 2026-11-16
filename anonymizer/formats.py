@@ -68,6 +68,21 @@ def transform(value, rules):
     return value
 
 
+def redact_table(rows, rules):
+    """Redact a CSV-like table, labelling whole cells under a personal-data header."""
+    from .czech import column_kind
+
+    columns = {}
+    for row in rows:
+        kinds = {index: kind for index, cell in enumerate(row) if (kind := column_kind(cell))}
+        if kinds:
+            columns.update(kinds)
+            yield [transform(cell, rules) for cell in row]
+            continue
+        yield [(rules.cell(columns[index], cell) or transform(cell, rules)) if index in columns
+               else transform(cell, rules) for index, cell in enumerate(row)]
+
+
 def redact_text(data, suffix, rules):
     if suffix == ".xml":
         root = etree.fromstring(data, etree.XMLParser(resolve_entities=False, no_network=True,
@@ -98,9 +113,7 @@ def redact_text(data, suffix, rules):
                 pass
         rows = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter, strict=True)
         result = io.StringIO(newline="")
-        csv.writer(result, delimiter=delimiter).writerows(
-            [transform(cell, rules) for cell in row] for row in rows
-        )
+        csv.writer(result, delimiter=delimiter).writerows(redact_table(rows, rules))
         return result.getvalue().encode()
     return transform(text, rules).encode()
 

@@ -273,6 +273,65 @@ class ProcessingTests(unittest.TestCase):
                         self.assertIn(marker, data)
                     self.assertIn(b"Cambria", archive.read(styles))
 
+    def test_spreadsheet_columns_by_header(self):
+        from anonymizer.office import SHEET, redact_office
+
+        source, target = self.root / "registr.xlsx", self.root / "registr_out.xlsx"
+        shared = ["Jméno a příjmení", "Datum narození:", "Datum podpisu", "IČO", "Poznámka",
+                  "Karolína Bílá", "Telefon"]
+        rows = [
+            '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c>'
+            '<c r="D1" t="s"><v>3</v></c><c r="E1" t="s"><v>4</v></c><c r="F1" t="s"><v>6</v></c></row>',
+            '<row r="2"><c r="A2" t="s"><v>5</v></c><c r="B2" s="3"><v>29252</v></c><c r="C2" s="3"><v>43831</v></c>'
+            '<c r="D2"><v>12345678</v></c><c r="E2"><v>12345678</v></c>'
+            '<c r="F2" t="inlineStr"><is><t>777 123 456</t></is></c></row>',
+            # Omitted references continue from the previous cell; a repeated value keeps its label.
+            '<row r="3"><c t="s"><v>5</v></c><c s="3"><v>29252</v></c></row>',
+        ]
+        with ZipFile(source, "w") as archive:
+            archive.writestr("[Content_Types].xml", "<Types/>")
+            archive.writestr("xl/workbook.xml", f'<workbook xmlns="{SHEET}"><workbookPr/></workbook>')
+            archive.writestr("xl/sharedStrings.xml", f'<sst xmlns="{SHEET}">' + "".join(
+                f"<si><t>{value}</t></si>" for value in shared) + "</sst>")
+            archive.writestr("xl/worksheets/sheet1.xml",
+                             f'<worksheet xmlns="{SHEET}"><sheetData>{"".join(rows)}</sheetData></worksheet>')
+        redact_office(source, target, Rules())
+        with ZipFile(target) as archive:
+            strings = archive.read("xl/sharedStrings.xml").decode()
+            sheet = archive.read("xl/worksheets/sheet1.xml").decode()
+        self.assertNotIn("Karolína", strings)
+        self.assertIn("[OSOBA-1]", strings)
+        self.assertIn("Datum podpisu", strings)
+        self.assertEqual(sheet.count("[NAROZENI-1]"), 2)
+        self.assertNotIn("29252", sheet)
+        self.assertIn("<v>43831</v>", sheet)
+        self.assertIn("[ICO-1]", sheet)
+        self.assertIn('<c r="E2"><v>12345678</v></c>', sheet)
+        self.assertIn("[TELEFON-1]", sheet)
+        self.assertNotIn("777", sheet)
+
+        formula = self.root / "vzorec.xlsx"
+        with ZipFile(formula, "w") as archive:
+            archive.writestr("xl/workbook.xml", "<root/>")
+            archive.writestr("xl/worksheets/sheet1.xml", f'<worksheet xmlns="{SHEET}"><sheetData>'
+                             '<row><c t="inlineStr"><is><t>Rodné číslo</t></is></c></row>'
+                             '<row><c t="str"><f>A5</f><v>800101/1234</v></c></row></sheetData></worksheet>')
+        with self.assertRaisesRegex(ValueError, "Vzorec"):
+            redact_office(formula, self.root / "vzorec_out.xlsx", Rules())
+
+    def test_table_columns_by_header(self):
+        from anonymizer.formats import redact_text
+
+        rules = Rules()
+        data = ("Jméno a příjmení;Dat. nar.;Datum podpisu;E-mail;Poznámka\n"
+                "Karolína Bílá;1. 2. 1980;3. 4. 2020;kb;bez poznámky\n"
+                "Karolína Bílá;01.02.1980;3. 4. 2020;;\n").encode()
+        output = redact_text(data, ".csv", rules)
+        lines = output.decode().splitlines()
+        self.assertEqual(lines[1], "[OSOBA-1];[NAROZENI-1];3. 4. 2020;[EMAIL-1];bez poznámky")
+        self.assertEqual(lines[2], "[OSOBA-1];[NAROZENI-1];3. 4. 2020;;")
+        self.assertEqual(redact_text(output, ".csv", rules), output)
+
     @unittest.skipUnless(os.environ.get("SPISREDAKT_TEST_TESSDATA"), "Chybí testovací jazyková data.")
     def test_word_image_and_hyperlink(self):
         from io import BytesIO
