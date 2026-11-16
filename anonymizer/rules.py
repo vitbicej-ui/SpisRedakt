@@ -102,8 +102,13 @@ class Rules:
             if not findings:
                 break
             total += len(findings)
-            for item in reversed(findings):
-                text = text[:item.start] + self.label(item) + text[item.end:]
+            # Labels are numbered from the end of the text, as in the Office formats.
+            labels = [self.label(item) for item in reversed(findings)][::-1]
+            pieces, position = [], 0
+            for item, label in zip(findings, labels):
+                pieces += [text[position:item.start], label]
+                position = item.end
+            text = "".join(pieces) + text[position:]
         return text, total
 
     def cell(self, kind, value):

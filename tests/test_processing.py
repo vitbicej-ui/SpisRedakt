@@ -888,6 +888,40 @@ class ProcessingTests(unittest.TestCase):
             image = pdf.Pixmap(result, result[0].get_images()[0][0])
             self.assertLessEqual(image.width * image.height, 30_000_000)
 
+    def test_archive_with_documents(self):
+        from io import BytesIO
+        from anonymizer.formats import ARCHIVE_BYTES, size_limit
+
+        self.assertEqual(size_limit(".zip"), ARCHIVE_BYTES)
+        self.assertEqual(ARCHIVE_BYTES, 500_000_000)
+        word = BytesIO()
+        document = Document()
+        document.add_paragraph("Smlouvu uzavřela Karolína Bílá.")
+        document.save(word)
+        with pdf.open() as doc:
+            doc.new_page().insert_text((72, 90), self.email, fontsize=16)
+            portable = doc.tobytes()
+        inner = BytesIO()
+        with ZipFile(inner, "w") as archive:
+            archive.writestr("poznamka.txt", "Telefon 777 123 456")
+        source, target = self.root / "input", self.root / "output"
+        source.mkdir()
+        target.mkdir()
+        with ZipFile(source / "spis.zip", "w") as archive:
+            archive.writestr("1/smlouva.docx", word.getvalue())
+            archive.writestr("2/podani.pdf", portable)
+            archive.writestr("3/prilohy.zip", inner.getvalue())
+        [(original, output, reason)] = list(process_folders(source, target))
+        self.assertIsNotNone(output, reason)
+        with ZipFile(output) as archive:
+            self.assertEqual(archive.namelist(), ["polozka-0001.docx", "polozka-0002.pdf", "polozka-0003.zip"])
+            self.assertEqual(Document(BytesIO(archive.read("polozka-0001.docx"))).paragraphs[0].text,
+                             "Smlouvu uzavřela [OSOBA-1].")
+            with pdf.open(stream=archive.read("polozka-0002.pdf")) as result:
+                self.assertEqual(result[0].get_text(), "")
+            with ZipFile(BytesIO(archive.read("polozka-0003.zip"))) as nested:
+                self.assertEqual(nested.read("polozka-0001.txt"), b"Telefon [TELEFON-1]")
+
     def test_case_law_citations_stay(self):
         rules = Rules()
         text = ("nikoliv však již dobu přesahující 12 let (srov. usnesení Krajského soudu v Brně ze dne "

@@ -30,6 +30,14 @@ MAX_BYTES = 40_000_000
 # Scans and documents with images are processed page by page or part by part,
 # so they may be much larger than text formats and archives.
 LARGE_BYTES = 400_000_000
+# Archives of a whole case file; members are processed one at a time.
+ARCHIVE_BYTES = 500_000_000
+ARCHIVE_UNPACKED = 2_000_000_000
+ARCHIVE_MEMBERS = 5_000
+
+
+def size_limit(suffix):
+    return ARCHIVE_BYTES if suffix == ".zip" else LARGE_BYTES if suffix in LARGE_FORMATS else MAX_BYTES
 
 
 class FormatError(ValueError):
@@ -161,14 +169,18 @@ def redact_text(data, suffix, rules):
     return transform(text, rules).encode()
 
 
-def redact_archive(data, rules, depth=0, budget=None):
+def redact_archive(source, target, rules, tessdata=None, depth=0, budget=None):
+    """Redact every supported member of a ZIP archive into a new archive.
+
+    ``source`` and ``target`` are paths or binary file objects; members are read
+    one at a time, so the archive is never held in memory as a whole.
+    """
     if budget is None:
-        budget = [MAX_BYTES, 500]
+        budget = [ARCHIVE_UNPACKED, ARCHIVE_MEMBERS]
     if depth >= 3:
         raise FormatError("archive_depth", "Archiv překročil limit vnoření.")
-    output = io.BytesIO()
-    with ZipFile(io.BytesIO(data)) as source, ZipFile(output, "w", ZIP_DEFLATED) as target:
-        for entry in source.infolist():
+    with ZipFile(source) as archive, ZipFile(target, "w", ZIP_DEFLATED) as output:
+        for entry in archive.infolist():
             budget[0] -= entry.file_size
             budget[1] -= 1
             if min(budget) < 0:
@@ -177,18 +189,22 @@ def redact_archive(data, rules, depth=0, budget=None):
                 continue
             if entry.flag_bits & 1:
                 raise FormatError("archive_encrypted", "Archiv obsahuje zašifrovaný soubor.")
-            payload = source.read(entry)
+            if entry.file_size > ARCHIVE_BYTES:
+                raise FormatError("size_limit", "Položka archivu překračuje limit velikosti.")
+            payload = archive.read(entry)
             suffix = identify(payload, Path(entry.filename).suffix.lower())
-            if suffix in TEXT:
-                cleaned = redact_text(payload, suffix, rules)
-                if redact_text(cleaned, suffix, rules) != cleaned:
-                    raise FormatError("residual_data", "Kontrola přílohy našla zbývající údaj.")
-            elif suffix == ".zip":
-                cleaned = redact_archive(payload, rules, depth + 1, budget)
-            else:
+            if suffix == ".zip":
+                cleaned = io.BytesIO()
+                redact_archive(io.BytesIO(payload), cleaned, rules, tessdata, depth + 1, budget)
+                cleaned, released = cleaned.getvalue(), ".zip"
+            elif suffix not in SUPPORTED:
                 raise FormatError("archive_member_unsupported", "Archiv obsahuje nepodporovanou položku.")
-            target.writestr(f"polozka-{len(target.filelist) + 1:04d}{suffix}", cleaned)
-    return output.getvalue()
+            elif len(payload) > size_limit(suffix):
+                raise FormatError("size_limit", "Položka archivu překračuje limit velikosti.")
+            else:
+                cleaned, released = redact_bytes(payload, suffix, rules, tessdata)
+            output.writestr(f"polozka-{len(output.filelist) + 1:04d}{released}", cleaned)
+            del payload, cleaned
 
 
 def redact_scan(source, destination, rules, tessdata):
@@ -245,17 +261,19 @@ def redact_file(source, destination, suffix, rules, tessdata):
             if archive.testzip() is not None:
                 raise FormatError("corrupt_output", "Výstup Office nelze přečíst.")
     else:
-        data = source.read_bytes()
-        if suffix in TEXT:
-            output = redact_text(data, suffix, rules)
-        elif suffix in IMAGES:
-            output = redact_image(data, suffix[1:], rules, tessdata)
+        if suffix == ".zip":
+            redact_archive(source, destination, rules, tessdata)
         else:
-            output = redact_archive(data, rules)
-        destination.write_bytes(output)
-        reopened = destination.read_bytes()
-        if suffix in TEXT and redact_text(reopened, suffix, rules) != reopened:
-            raise FormatError("residual_data", "Kontrola výstupu našla zbývající údaj.")
+            data = source.read_bytes()
+            if suffix in TEXT:
+                output = redact_text(data, suffix, rules)
+            else:
+                output = redact_image(data, suffix[1:], rules, tessdata)
+            destination.write_bytes(output)
+        if suffix in TEXT:
+            reopened = destination.read_bytes()
+            if redact_text(reopened, suffix, rules) != reopened:
+                raise FormatError("residual_data", "Kontrola výstupu našla zbývající údaj.")
         if suffix == ".zip":
             with ZipFile(destination) as archive:
                 if archive.testzip() is not None:
@@ -263,12 +281,12 @@ def redact_file(source, destination, suffix, rules, tessdata):
 
 
 def redact_bytes(data, suffix, rules, tessdata, depth=0):
-    """Redact an embedded file (e-mail attachment); return its bytes and suffix."""
+    """Redact an embedded file (e-mail attachment, archive member); return its bytes and suffix."""
     import tempfile
 
     detected = identify(data, suffix)
     if detected not in SUPPORTED:
-        raise FormatError("attachment_unsupported", "E-mail obsahuje přílohu v nepodporovaném formátu.")
+        raise FormatError("attachment_unsupported", "E-mail nebo archiv obsahuje položku v nepodporovaném formátu.")
     with tempfile.TemporaryDirectory(prefix="SpisRedakt-attachment-") as folder:
         source = Path(folder) / ("input" + detected)
         target = Path(folder) / ("output" + output_suffix(detected))
