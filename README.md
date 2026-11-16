@@ -59,4 +59,4 @@ $env:SPISREDAKT_TEST_TESSDATA = 'C:\SpisRedakt\tessdata'
 .\.venv\Scripts\python.exe -m PyInstaller --noconfirm --windowed --name SpisRedakt start.py
 ```
 
-Testy generují syntetické soubory. GitHub Actions sestavuje balíček na Windows, testuje OCR a ověřuje start zabalené aplikace. Pokyny k dalším iteracím jsou v [AUTOMATION.md](AUTOMATION.md).
+Testy generují syntetické soubory. GitHub Actions sestavuje balíček na Windows, testuje OCR a ověřuje start zabalené aplikace. Pokyny k dalším iteracím jsou v [AUTOMATION.md](AUTOMATION.md), postup ručního testu v [TESTOVANI.md](TESTOVANI.md).
