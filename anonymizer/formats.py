@@ -14,7 +14,8 @@ from .office import BLOCKS, redact_office, redact_image
 TEXT = {".txt", ".csv", ".tsv", ".json", ".xml"}
 IMAGES = {".png", ".jpg", ".jpeg", ".bmp"}
 SCANS = {".tif", ".tiff"}
-SUPPORTED = TEXT | IMAGES | SCANS | BLOCKS.keys() | {".pdf", ".zip"}
+ODF = {".odt", ".ods", ".odp"}
+SUPPORTED = TEXT | IMAGES | SCANS | ODF | BLOCKS.keys() | {".pdf", ".zip", ".rtf"}
 # Formats that cannot be written back safely are released in a related format.
 OUTPUT = {".tif": ".pdf", ".tiff": ".pdf"}
 
@@ -33,6 +34,8 @@ class FormatError(ValueError):
 def identify(data, suffix):
     if data.startswith(b"%PDF-"):
         return ".pdf"
+    if data.startswith(b"{\\rtf"):
+        return ".rtf"
     for signature, detected in ((b"\x89PNG\r\n\x1a\n", ".png"), (b"\xff\xd8\xff", ".jpg"), (b"BM", ".bmp"),
                                 (b"II*\x00", ".tif"), (b"MM\x00*", ".tif")):
         if data.startswith(signature):
@@ -44,6 +47,11 @@ def identify(data, suffix):
                                    ("ppt/presentation.xml", ".pptx")):
                 if "[Content_Types].xml" in names and part in names:
                     return detected
+            from .odf import identify_odf
+
+            detected = identify_odf(archive)
+            if detected:
+                return detected
         return ".zip"
     if suffix in TEXT:
         return suffix
@@ -174,6 +182,17 @@ def redact_file(source, destination, suffix, rules, tessdata):
         redact_pdf(source, destination, rules, tessdata)
     elif suffix in SCANS:
         redact_scan(source, destination, rules, tessdata)
+    elif suffix in ODF:
+        from .odf import redact_odf
+
+        redact_odf(source, destination, rules, tessdata, redact_image)
+        with ZipFile(destination) as archive:
+            if archive.testzip() is not None or archive.namelist()[0] != "mimetype":
+                raise FormatError("corrupt_output", "Výstup OpenDocument nelze přečíst.")
+    elif suffix == ".rtf":
+        from .rtf import redact_rtf
+
+        destination.write_bytes(redact_rtf(source.read_bytes(), rules, tessdata, redact_image))
     elif suffix in BLOCKS:
         redact_office(source, destination, rules, tessdata)
         with ZipFile(destination) as archive:

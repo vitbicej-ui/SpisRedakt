@@ -218,7 +218,7 @@ LABEL = re.compile(r"\[[A-Z_]+-\d+\]")
 # flattened to text. Names stop at a comma; addresses keep theirs.
 FORM_FIELD = re.compile(
     r"(?:^|;)[ \t]*(" + "|".join(f"(?:{pattern.pattern})" for kind, pattern in COLUMN_HEADERS) +
-    r")[ \t]*:[ \t]*(?!\[[A-Z_]+-\d+\])([^\n;]+?)(?=[ \t]*(?:$|;|\n))", re.I | re.M,
+    r")[ \t]*:[ \t]*(?!\[[A-Z_]+-\d+\])([^\s;][^\n;]*?)(?=[ \t]*(?:$|;|\n))", re.I | re.M,
 )
 
 
@@ -247,7 +247,7 @@ def header_row(headers, columns, texts):
 def plausible_value(kind, text):
     """Check that a cell beside "Label:" looks like a value, not another heading."""
     text = str(text).strip()
-    if text.endswith(":"):
+    if text.endswith(":") or LABEL.search(text):
         return False
     if kind == "EMAIL":
         return "@" in text

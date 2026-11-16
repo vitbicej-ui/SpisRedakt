@@ -22,7 +22,7 @@ Aplikace si pamatuje obě složky. Dokud je otevřená, sleduje nové a změněn
 
 Pokud aplikace rozpozná slovenský výpis z rejstříku trestů nebo osobní formulář v PDF, výstup nevydá. Rozpoznání formuláře závisí na čitelnosti textu a OCR. Neúplnou redakci ze starších verzí nepoužívejte pro sdílení.
 
-1. Vyberte vstupní složku s dokumenty jednoho spisu. Program zpracuje DOCX, XLSX, PPTX a PDF i v podsložkách. Ostatní formáty přeskočí.
+1. Vyberte vstupní složku s dokumenty jednoho spisu. Program zpracuje DOCX, XLSX, PPTX, ODT, ODS, ODP, RTF, PDF a další formáty níže, i v podsložkách. Ostatní formáty přeskočí.
 2. Vyberte samostatnou výstupní složku a tím spusťte dávku. Název `Smlouva.docx` se změní na `Smlouva_anonymizovano.docx`. Struktura podsložek zůstává zachována. Originály i existující výstupy zůstanou beze změny. Název souboru může obsahovat osobní údaj, proto zkontrolujte také názvy před sdílením.
 3. Porovnejte každý výstup s originálem, včetně všech stran, příloh a významu ponechaného textu. Případné přehlédnuté údaje odstraňte před sdílením.
 
@@ -32,6 +32,8 @@ Po každé dávce aplikace zobrazí cestu k vlastní složce s průběžným pro
 
 ## Rozsah zpracování
 
+- RTF zachovává řídicí slova, a tedy formátování. Nahradí se jen viditelné znaky v odstavcích, buňkách, poznámkách, záhlavích a výsledcích polí. Vlastnosti dokumentu, autoři komentářů a záložní kopie obrázků se odstraní a odkazy se znefunkční. Obrázky PNG a JPEG projdou OCR. Jiné obrázky, binárně vložená data a vložené objekty zpracování zastaví, stejně jako citlivý údaj v záložce nebo rejstříku. Tabulky v RTF se kontrolují jen pravidly pro text, bez nadpisů sloupců.
+- ODT, ODS a ODP zachovávají styly. Text se nahrazuje napříč úseky formátování, buňky tabulek se řídí nadpisy a popisky jako u Office a u data v ODS se odstraní i skrytá hodnota buňky. Náhled, nastavení rozhraní a osobní metadata se nevydávají a odkazy se znefunkční. Vložené objekty, makra, podpisy, šifrování a obrázky mimo PNG a JPEG zpracování zastaví.
 - Skeny TIFF, i vícestránkové, se vydávají jako PDF z obrazů (`Sken.tif` → `Sken_anonymizovano.pdf`). Každá strana vždy prochází českým OCR a stejným začerněním a kontrolou jako PDF. TIFF se pozná i podle obsahu, pokud má jinou příponu.
 - Dávka přijímá TXT, CSV, TSV, JSON a XML, samostatné PNG, JPEG a BMP a ZIP s textovými soubory nebo vnořenými ZIP. XML s DTD a archivy s jinými položkami se nevydávají. Rozpoznání podle signatury funguje u PDF, ZIP, moderního Office a podporovaných obrázků. Textové formáty používají příponu.
 - Kontrola před zveřejněním znovu načte textové výstupy a ověří, že pravidla nenajdou další náhrady. U Office a ZIP ověřuje také čitelnost balíčku. Výsledek kontroly vypovídá o použitých pravidlech a zpracovaných vrstvách. Kontextově nepřímá identifikace a nerozpoznané údaje zůstávají možné.

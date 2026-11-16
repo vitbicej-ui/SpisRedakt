@@ -488,6 +488,78 @@ class ProcessingTests(unittest.TestCase):
                     remaining = recognize_image(image, os.environ["SPISREDAKT_TEST_TESSDATA"])[0]
                     self.assertEqual(Rules().find(remaining), [], remaining)
 
+    def test_rtf_keeps_formatting(self):
+        from anonymizer.rtf import redact_rtf
+
+        document = (rb"{\rtf1\ansi\ansicpg1250\deff0{\fonttbl{\f0 Calibri;}}"
+                    rb"{\info{\author Karol\'edna B\'edl\'e1}{\title Spis}}" b"\n"
+                    rb"\uc1\pard\b Smlouvu uzav\'f8eli {\i Karol\'edna} B\u237?l\u225? a Hynek Dvo\'f8\'e1k.\b0\par" b"\n"
+                    rb"Tel.: 777 123 456\par" b"\n"
+                    rb"{\field{\*\fldinst {HYPERLINK " b'"mailto:kb@example.test"' rb"}}{\fldrslt kb@example.test}}\par"
+                    rb"{\*\bkmkstart Poznamka}{\*\bkmkend Poznamka}Datum podpisu: 3. 4. 2020\par}")
+        output = redact_rtf(document, Rules())
+        self.assertEqual(output, (
+            rb"{\rtf1\ansi\ansicpg1250\deff0{\fonttbl{\f0 Calibri;}}" b"\n"
+            rb"\uc1\pard\b Smlouvu uzav\'f8eli {\i [OSOBA-2]} a [OSOBA-1].\b0\par" b"\n"
+            rb"Tel.: [TELEFON-1]\par" b"\n"
+            rb"{\field{\*\fldinst { HYPERLINK " b'"https://example.invalid/"' rb" }}{\fldrslt [EMAIL-1]}}\par"
+            rb"{\*\bkmkstart Poznamka}{\*\bkmkend Poznamka}Datum podpisu: 3. 4. 2020\par}"))
+        with self.assertRaisesRegex(ValueError, "skryté"):
+            redact_rtf(rb"{\rtf1{\*\bkmkstart kb@example.test}Text\par}", Rules())
+        with self.assertRaisesRegex(ValueError, "objekt"):
+            redact_rtf(rb"{\rtf1{\object\objemb{\*\objdata 00}}\par}", Rules())
+
+    def test_opendocument_text_and_spreadsheet(self):
+        from anonymizer.formats import identify, redact_file
+
+        office = "urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+        text = "urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+        table = "urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+        xlink = "http://www.w3.org/1999/xlink"
+        namespaces = f'xmlns:office="{office}" xmlns:text="{text}" xmlns:table="{table}" xmlns:xlink="{xlink}"'
+        content = (
+            f'<office:document-content {namespaces}><office:body><office:text>'
+            '<text:p text:style-name="P1">Smlouvu uzavřeli <text:span text:style-name="T1">Karolína</text:span>'
+            '<text:s/>Bílá a<text:s text:c="2"/>Hynek Dvořák.</text:p>'
+            f'<text:p><text:a xlink:href="mailto:kb@example.test">kb@example.test</text:a></text:p>'
+            '<table:table table:name="Seznam"><table:table-row>'
+            '<table:table-cell office:value-type="string"><text:p>Jméno</text:p></table:table-cell>'
+            '<table:table-cell office:value-type="string"><text:p>Datum narození</text:p></table:table-cell>'
+            '</table:table-row><table:table-row>'
+            '<table:table-cell office:value-type="string"><text:p>Ota Hrubý</text:p></table:table-cell>'
+            '<table:table-cell office:value-type="date" office:date-value="1980-02-01"><text:p>01.02.80</text:p></table:table-cell>'
+            '</table:table-row></table:table></office:text></office:body></office:document-content>')
+        meta = (f'<office:document-meta {namespaces} xmlns:meta="urn:oasis:names:tc:opendocument:xmlns:meta:1.0" '
+                'xmlns:dc="http://purl.org/dc/elements/1.1/"><office:meta><dc:creator>Karolína Bílá</dc:creator>'
+                '<meta:generator>Test</meta:generator></office:meta></office:document-meta>')
+        manifest = ('<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0">'
+                    '<manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.text"/>'
+                    '<manifest:file-entry manifest:full-path="Thumbnails/thumbnail.png" manifest:media-type="image/png"/>'
+                    '</manifest:manifest>')
+        source, target = self.root / "smlouva.bin", self.root / "smlouva_out.odt"
+        with ZipFile(source, "w") as archive:
+            archive.writestr("mimetype", "application/vnd.oasis.opendocument.text")
+            archive.writestr("content.xml", content)
+            archive.writestr("meta.xml", meta)
+            archive.writestr("styles.xml", f'<office:document-styles {namespaces}/>')
+            archive.writestr("META-INF/manifest.xml", manifest)
+            archive.writestr("Thumbnails/thumbnail.png", b"\x89PNG")
+        self.assertEqual(identify(source.read_bytes(), ".bin"), ".odt")
+        redact_file(source, target, ".odt", Rules(), None)
+        with ZipFile(target) as archive:
+            self.assertEqual(archive.namelist()[0], "mimetype")
+            self.assertNotIn("Thumbnails/thumbnail.png", archive.namelist())
+            self.assertNotIn(b"Thumbnails", archive.read("META-INF/manifest.xml"))
+            self.assertNotIn("Karolína".encode(), archive.read("meta.xml"))
+            result = archive.read("content.xml").decode()
+        for value in ("Karolína", "Bílá", "Dvořák", "kb@example", "Hrubý", "1980-02-01", "01.02.80"):
+            self.assertNotIn(value, result)
+        # Tables are planned first; the removed single space keeps the following text.
+        self.assertIn('text:style-name="T1">[OSOBA-3]</text:span> a<text:s text:c="2"/>[OSOBA-2].', result)
+        self.assertIn("<text:p>[OSOBA-1]</text:p>", result)
+        self.assertIn('office:value-type="string"><text:p>[NAROZENI-1]</text:p>', result)
+        self.assertIn("https://example.invalid/", result)
+
     def test_initials(self):
         rules = Rules()
         lines = ["Žalobce Jan Novák podal žalobu.", "Rozsudek převzal J. Novák dne 3. 4.",
