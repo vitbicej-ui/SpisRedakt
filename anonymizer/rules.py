@@ -1,8 +1,9 @@
 import re
 import unicodedata
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
-from .czech import LABEL, anchored, cls, colon_lines, contextual_findings, structured_identity
+from .czech import (LABEL, anchored, cls, colon_lines, contextual_findings, identity_family, structured_identity,
+                    surface_surname)
 
 
 def key(value):
@@ -97,6 +98,12 @@ class Rules:
         self.labels = {}
         self.surnames = set()
         self.counts = Counter()
+        # family key -> [(gender, label)] of every person known by that surname
+        self.families = {}
+        # labels that so far stand for a bare surname only
+        self.bare = set()
+        # kind -> original strings found. Memory only: never written, logged or put into a message.
+        self.surfaces = defaultdict(set)
         patterns = []
         for line in alias_lines:
             variants = [key(part) for part in line.split("|") if part.strip()]
@@ -109,9 +116,9 @@ class Rules:
             patterns.append("(" + r"[ \t\n]+".join(re.escape(word) for word in variant.split()) + ")")
         self.custom = re.compile(r"(?<!\w)(?:" + "|".join(patterns) + r")(?!\w)", re.I) if patterns else None
 
-    def find(self, text):
+    def find(self, text, contexts=True):
         candidates = [(start, end, kind, key(identity))
-                      for start, end, kind, identity in contextual_findings(text, self.surnames)]
+                      for start, end, kind, identity in contextual_findings(text, self.surnames, self.families, contexts)]
         if self.custom:
             for match in self.custom.finditer(text):
                 variant = self.variants[match.lastindex - 1]
@@ -135,11 +142,71 @@ class Rules:
                     previous[1] = item[1]
             else:
                 merged.append(list(item))
+        for start, end, kind, _ in merged:
+            self.remember(kind, text[start:end])
         return [Finding(*item) for item in merged]
+
+    def remember(self, kind, surface):
+        if "[" in surface and LABEL.search(surface):
+            return
+        known = self.surfaces[kind]
+        if surface in known:
+            return
+        known.add(surface)
+        if kind == "OSOBA":
+            surname = surface_surname(surface)
+            if surname:
+                self.surfaces["PRIJMENI"].add(surname)
+
+    def label_for(self, kind):
+        self.counts[kind] += 1
+        return f"[{kind}-{self.counts[kind]}]"
+
+    @staticmethod
+    def compatible(first, second):
+        return first is None or second is None or first == second
+
+    def register(self, keys, gender, label):
+        for key_, _ in keys:
+            entries = self.families.setdefault(key_, [])
+            if (gender, label) not in entries:
+                entries.append((gender, label))
+
+    def surname_label(self, identity):
+        """Label of a bare surname ("~key|gender"): that of the one person with the surname."""
+        key_, gender = identity[1:].split("|")
+        gender = gender or None
+        labels = []
+        for known_gender, known in self.families.get(key_, ()):
+            if self.compatible(gender, known_gender) and known not in labels:
+                labels.append(known)
+        if len(labels) == 1:
+            return labels[0]
+        if labels:
+            # Several persons share the surname: one label for all bare uses, over-marking is fine.
+            if ("OSOBA", identity) not in self.labels:
+                self.labels["OSOBA", identity] = self.label_for("OSOBA")
+            return self.labels["OSOBA", identity]
+        label = self.label_for("OSOBA")
+        self.register(((key_, gender),), gender, label)
+        self.bare.add(label)
+        return label
+
+    def shared_surname(self, keys, gender):
+        """A full name takes the label of the single earlier bare use of its surname."""
+        labels = {known for known_gender, known in self.families.get(keys[0][0], ())
+                  if self.compatible(gender, known_gender)}
+        if len(labels) == 1 and labels <= self.bare:
+            return labels.pop()
+        return None
 
     def label(self, item):
         identity = (item.kind, item.identity)
-        if item.kind == "OSOBA" and identity not in self.labels:
+        if item.kind == "OSOBA" and item.identity.startswith("~") and "|" in item.identity:
+            return self.surname_label(item.identity)
+        person = item.kind == "OSOBA" and identity not in self.labels
+        keys = ()
+        if person:
             initials = INITIALS.fullmatch(item.identity)
             if initials:
                 # "J. Novák" reuses the label of the only known "Jan Novák".
@@ -151,21 +218,45 @@ class Rules:
                     self.labels[identity] = matches.pop()
             else:
                 self.surnames.add(item.identity.split(" ", 1)[-1])
+        if person:
+            keys, gender = identity_family(item.identity)
+            if keys and identity not in self.labels:
+                shared = self.shared_surname(keys, gender)
+                if shared:
+                    self.labels[identity] = shared
+                    self.bare.discard(shared)
         if identity not in self.labels:
-            self.counts[item.kind] += 1
-            self.labels[identity] = f"[{item.kind}-{self.counts[item.kind]}]"
+            self.labels[identity] = self.label_for(item.kind)
+        if keys:
+            self.register(keys, gender, self.labels[identity])
         return self.labels[identity]
+
+    def collect(self, text):
+        """First phase of a two-phase run over a whole case (all its texts).
+
+        Registers the persons and other labels found in ``text`` and returns nothing.
+        Call it on every text of the case, then ``replace`` each text: a surname that
+        is introduced only in a later document is then replaced in an earlier one too.
+        """
+        self.replace(text)
 
     def replace(self, text):
         total = 0
         # A replacement can expose a new match next to a label; repeat until stable.
-        for _ in range(3):
-            findings = self.find(text)
+        for turn in range(3):
+            # Persons named by a context ("pan X") are found in the first pass; later passes only repeat the scan.
+            findings = self.find(text, turn == 0)
             if not findings:
                 break
             total += len(findings)
             # Labels are numbered from the end of the text, as in the Office formats.
-            labels = [self.label(item) for item in reversed(findings)][::-1]
+            # A bare surname is labelled last, once every full name of the text is known.
+            labels = [None] * len(findings)
+            for bare in (False, True):
+                for index in reversed(range(len(findings))):
+                    item = findings[index]
+                    if (item.kind == "OSOBA" and item.identity.startswith("~")) == bare:
+                        labels[index] = self.label(item)
             pieces, position = [], 0
             for item, label in zip(findings, labels):
                 pieces += [text[position:item.start], label]
@@ -178,4 +269,5 @@ class Rules:
         text = str(value).strip()
         if not text or LABEL.fullmatch(text):
             return None
+        self.remember(kind, text)
         return self.label(Finding(0, len(text), kind, structured_identity(kind, text)))

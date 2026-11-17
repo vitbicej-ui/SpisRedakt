@@ -1422,11 +1422,13 @@ class ProcessingTests(unittest.TestCase):
         self.assertEqual(count, 2193)
         self.assertEqual(hashlib.sha256(replaced.encode()).hexdigest(),
                          "00a60cf0ead5d8303899091355997d9e3804a01bf701e1105692bf011b4d0c92")
-        # Paragraph by paragraph with one shared Rules, as the Office formats do.
+        # Paragraph by paragraph with one shared Rules, as the Office formats do. The hash changed
+        # when bare surnames became replaceable (14 lines "... také Bílá J." now give the label
+        # instead of "Bílá"); every other line, and the whole-text hash above, are unchanged.
         shared = Rules()
         pieces = [shared.replace(line)[0] for line in text.split("\n")]
         self.assertEqual(hashlib.sha256("\n".join(pieces).encode()).hexdigest(),
-                         "1635a96fcd269c2082dfbb865f07a6584616a5e3ee4f39e6541f552c28a78846")
+                         "7b68591eb14723f353db5eb0ab9fcb6952108b8230d496a9c7a22d2add57e636")
         for kind in ("OSOBA", "ADRESA", "ORGANIZACE", "TELEFON", "EMAIL", "ICO", "SPIS", "RC", "UCET", "IBAN",
                      "DIC", "DOKLAD", "NAROZENI", "OSOBNI_UDAJ"):
             self.assertRegex(replaced, rf"\[{kind}-\d+\]")
@@ -1464,6 +1466,163 @@ class ProcessingTests(unittest.TestCase):
         for source in (r"[\w.+-]", r"[\w-]", r"\d", r"\w"):
             self.assertEqual(set(re.compile(source, re.IGNORECASE).findall(every)),
                              set(re.compile(source).findall(every)), source)
+
+
+class SurnameTests(unittest.TestCase):
+    """Bare surnames after the first full name (families of surnames)."""
+
+    @staticmethod
+    def labels(text, rules=None):
+        rules = rules or Rules()
+        return rules.replace(text)[0], rules
+
+    def test_surname_family(self):
+        groups = [
+            ["Novák", "Nováka", "Novákovi", "Nováku", "Novákem", "Nováková", "Novákové", "Novákovou", "Novak", "NOVÁK"],
+            ["Malý", "Malého", "Malému", "Malým", "Malá", "Malé", "Malou", "Maly"],
+            ["Hájek", "Hájka", "Hájkovi", "Hájkem", "Hájková", "HÁJEK", "Hajek"],
+            ["Wolf", "Wolfa", "Wolfovi", "Wolfem", "Wolfová", "Wolfové"],
+            ["Kramerius", "Kramerie", "Krameriovi", "Krameriem"],
+            ["Svoboda", "Svobody", "Svobodovi", "Svobodu", "Svobodou", "Svobodová"],
+            ["Němec", "Němce", "Němcová"],
+        ]
+        for group in groups:
+            self.assertEqual({czech.surname_family(word)[0] for word in group}, {czech.surname_family(group[0])[0]}, group)
+        self.assertEqual(len({czech.surname_family(group[0])[0] for group in groups}), len(groups))
+        gender = {word: czech.surname_family(word)[1] for word in
+                  ("Novák", "Nováka", "Nováková", "Novákovou", "Malý", "Malá", "Malé", "Malou", "Wolfová")}
+        self.assertEqual(gender, {"Novák": "m", "Nováka": "m", "Nováková": "f", "Novákovou": "f", "Malý": "m",
+                                  "Malá": "f", "Malé": None, "Malou": None, "Wolfová": "f"})
+        self.assertEqual(czech.surname_family("Nováková-Svobodová")[1], "f")
+
+    def test_every_occurrence_of_a_surname_is_replaced(self):
+        out, rules = self.labels("Obžalovaný Tadeáš Wolf mlčel. Wolf pak řekl, že Wolfa nikdo neviděl "
+                                 "a Wolfovi nikdo nevolal.")
+        self.assertEqual(out, "Obžalovaný [OSOBA-1] mlčel. [OSOBA-1] pak řekl, že [OSOBA-1] nikdo neviděl "
+                              "a [OSOBA-1] nikdo nevolal.")
+        self.assertEqual(rules.find(out), [])
+        # The same when the surname comes first and in reverse paragraph order.
+        out, _ = self.labels("Wolfovi nikdo nevolal.\nWolf mlčel. Obžalovaný Tadeáš Wolf řekl.")
+        self.assertEqual(set(re.findall(r"\[OSOBA-\d+\]", out)), {"[OSOBA-1]"})
+        self.assertNotIn("Wolf", out)
+
+    def test_surnames_follow_gender(self):
+        out, _ = self.labels("Jan Novák a Jana Nováková. Novák odešel, Nováková zůstala.")
+        first, second, third, fourth = re.findall(r"\[OSOBA-\d+\]", out)
+        self.assertEqual(third, first)
+        self.assertEqual(fourth, second)
+        self.assertNotEqual(first, second)
+        self.assertEqual(out.count("Novák"), 0)
+        # A person known only by the surname and a gender-less form share the label.
+        out, _ = self.labels("Svědek Wolfová uvedla, že Wolfovou nikdo nevolal.")
+        self.assertEqual(set(re.findall(r"\[OSOBA-\d+\]", out)), {"[OSOBA-1]"})
+
+    def test_ambiguous_surname_gets_a_shared_label(self):
+        out, _ = self.labels("Jan Novák a Petr Novák. Novák řekl. Nováková přišla.")
+        jan, petr, bare_male, bare_female = re.findall(r"\[OSOBA-\d+\]", out)
+        self.assertEqual(len({jan, petr, bare_male}), 3)
+        self.assertNotIn(bare_female, {jan, petr, bare_male})
+        self.assertNotIn("Novák", out)
+
+    def test_two_phase_collect_then_replace(self):
+        rules = Rules()
+        rules.collect("Svědek Karel Hájek, nar. 1. 2. 1980, bytem Dlouhá 12, Praha.")
+        later = "Hájka jsme předvolali. HÁJEK se nedostavil."
+        out = rules.replace(later)[0]
+        label = rules.replace("Svědek Karel Hájek")[0].split()[-1]
+        self.assertEqual(out, f"{label} jsme předvolali. {label} se nedostavil.")
+        self.assertIn("[OSOBA-", label)
+        # Without the first phase a lone surname stays: nothing says it is a person.
+        self.assertEqual(Rules().replace(later)[0], later)
+        # collect returns nothing and registers the labels of every kind.
+        self.assertIsNone(rules.collect("Telefon: 602 123 456"))
+        self.assertIn(("TELEFON", "602123456"), rules.labels)
+
+    def test_pan_and_roles_with_one_word(self):
+        out, _ = self.labels("Přišel pan Kramerius. Kramerius pak uvedl, že Krameriovi nikdo nevěřil.")
+        self.assertEqual(set(re.findall(r"\[OSOBA-\d+\]", out)), {"[OSOBA-1]"})
+        self.assertNotIn("Kramerius", out)
+        out, _ = self.labels("Zeptali jsme se paní Wolfové. Žalobce Brázda tvrdí, že svědkyně Wolfová lhala.")
+        self.assertNotIn("Wolf", out)
+        self.assertNotIn("Brázda", out)
+        # Names of institutions and given names after a role are not surnames.
+        for text in ("Žalobce Okresní soud rozhodl. Okresní soud věc vrátil.",
+                     "Svědek Jan přišel. Jan odešel.", "Pan Hlavní město. Hlavní město Praha.",
+                     "Žalobce Česká republika. Česká republika zaplatí."):
+            self.assertEqual(Rules().replace(text)[0], text)
+
+    def test_common_surnames_need_context(self):
+        out, _ = self.labels("Pavel Malý podal žalobu. Žalobce Malý tvrdí totéž. Malý rozdíl v ceně nehraje roli. "
+                             "Řekl to Malému.")
+        self.assertEqual(out, "[OSOBA-1] podal žalobu. Žalobce [OSOBA-1] tvrdí totéž. Malý rozdíl v ceně nehraje roli. "
+                              "Řekl to [OSOBA-1].")
+        # After a title, an initial and before "nar." the sentence start does not matter.
+        out, _ = self.labels("Pavel Černý přišel. Černý den nastal. Mgr. Černý řekl. Černý, nar. 1. 2. 1980.\nČerný pes.")
+        self.assertEqual(out.count("Černý"), 2)
+        self.assertEqual(out.count("[OSOBA-1]"), 3)
+        # A line break inside a sentence is not a sentence start.
+        out, _ = self.labels("Pavel Černý přišel. Podal žalobu\nČerný ji vzal zpět.")
+        self.assertNotIn("Černý ji", out)
+
+    def test_uncommon_surnames_everywhere(self):
+        out, _ = self.labels("Jan Novák přišel. NOVÁK mlčel. Novák řekl. Na místě byli Novakovi a Novak.")
+        self.assertNotRegex(out, "(?i)nov[aá]k")
+
+    def test_institutions_and_places_stay(self):
+        text = ("Žalobce Petr Kolín podal žalobu. Okresní soud v Kolíně rozhodl. Krajský soud ve Kolíně věc vrátil. "
+                "V obci Kolín je pošta. Ulice Kolín a město Kolín. Kolín řekl, že Kolínovi nikdo nevěřil.")
+        out, _ = self.labels(text)
+        for kept in ("Okresní soud v Kolíně", "Krajský soud ve Kolíně", "obci Kolín", "Ulice Kolín", "město Kolín"):
+            self.assertIn(kept, out)
+        self.assertIn("[OSOBA-1] řekl, že [OSOBA-1] nikdo", out)
+
+    def test_no_person_no_change(self):
+        text = ("Soud dále konstatoval, že Okresní soud v Praze rozhodl. Novák nic neřekl. Malý rozdíl. "
+                "Svoboda slova je zaručena. Hora a Zima přišly.")
+        out, rules = self.labels(text)
+        self.assertEqual(out, text)
+        self.assertEqual(rules.families, {})
+
+    def test_initials_still_share_the_label(self):
+        rules = Rules()
+        lines = ["Žalobce Jan Novák podal žalobu.", "Rozsudek převzal J. Novák dne 3. 4.", "Novák souhlasí.",
+                 "Žalobce Petr Dvořák.", "Rozsudek převzal P. Dvořák.", "Dvořák J. přišel."]
+        self.assertEqual([rules.replace(line)[0] for line in lines], [
+            "Žalobce [OSOBA-1] podal žalobu.", "Rozsudek převzal [OSOBA-1] dne 3. 4.", "[OSOBA-1] souhlasí.",
+            "Žalobce [OSOBA-2].", "Rozsudek převzal [OSOBA-2].", "[OSOBA-3] přišel."])
+
+    def test_labels_are_not_scanned(self):
+        rules = Rules()
+        rules.replace("Žalobce Jan Osoba přišel. Osoba odešel.")
+        self.assertEqual(rules.find("Dále [OSOBA-1] a [TELEFON-2]."), [])
+
+    def test_hyphenated_and_ocr_forms(self):
+        out, _ = self.labels("Svědkyně Eva Nováková-Svobodová přišla. Pak Svobodová řekla totéž. Novakova odešla.")
+        self.assertEqual(set(re.findall(r"\[OSOBA-\d+\]", out)), {"[OSOBA-1]"})
+        self.assertNotRegex(out, "(?i)(nov[aá]k|svobod)")
+
+    def test_surfaces_stay_in_memory(self):
+        rules = Rules()
+        rules.replace("Žalobce Tadeáš Wolf, nar. 1. 2. 1980, bytem Dlouhá 12, Praha. Wolfovi nikdo nevolal.")
+        rules.cell("OSOBA", "Karel Hájek")
+        self.assertIn("Tadeáš Wolf", rules.surfaces["OSOBA"])
+        self.assertIn("Wolfovi", rules.surfaces["OSOBA"])
+        self.assertIn("Wolf", rules.surfaces["PRIJMENI"])
+        self.assertIn("Hájek", rules.surfaces["PRIJMENI"])
+        self.assertIn("1. 2. 1980", rules.surfaces["NAROZENI"])
+        self.assertNotIn("Wolf", rules.surfaces["NAROZENI"])
+        # No label, message or audit field can carry them: the strings are only ever read from memory.
+        base = Path(czech.__file__).parent
+        for name in ("audit.py", "reasons.py", "gui.py"):
+            self.assertNotIn("surfaces", (base / name).read_text(encoding="utf-8"), name)
+        from anonymizer.reasons import ADVICE, REASONS
+        found = " ".join([text for text in ADVICE.values()] + [str(item) for item in REASONS])
+        for kind in rules.surfaces.values():
+            for surface in kind:
+                self.assertNotIn(surface, found)
+        # Labels never contain a found string.
+        out = rules.replace("Žalobce Tadeáš Wolf")[0]
+        self.assertNotIn("Wolf", out)
 
 
 class AdviceTests(unittest.TestCase):
