@@ -3,7 +3,7 @@ import tempfile
 import os
 
 from .documents import redact_docx, redact_pdf
-from .formats import SUPPORTED, ARCHIVE_BYTES, FormatError, size_limit, identify, output_suffix, redact_file
+from .formats import SUPPORTED, ARCHIVE_BYTES, FormatError, size_limit, identify, has_signature, HEADER_BYTES, output_suffix, redact_file
 from .rules import Rules
 from .audit import Audit
 from .reasons import reason_code
@@ -40,49 +40,57 @@ def _process_folders(input_root, output_root, tessdata, audit, selected):
         attempts = 0
         collisions = 0
         try:
-            with source.open("rb") as stream:
-                data = stream.read(ARCHIVE_BYTES + 1)
-            if len(data) > ARCHIVE_BYTES:
-                raise FormatError("size_limit", "Vstup překračuje limit velikosti.")
-            suffix = identify(data, source.suffix.lower())
-            if len(data) > size_limit(suffix):
-                raise FormatError("size_limit", "Vstup překračuje limit velikosti.")
-            if suffix is None and source.suffix.lower() in SUPPORTED:
-                raise FormatError("invalid_signature", "Obsah neodpovídá deklarovanému formátu.")
-            if suffix not in SUPPORTED:
-                if audit:
-                    audit.record("skipped", phase=phase, code="unsupported_format", attempts=0, **fields)
-                continue
-            fields["format"] = suffix[1:].upper()
-            phase = "prepare"
-            directory = target_root.joinpath(*(safe_name(part, rules) for part in source.parent.relative_to(source_root).parts))
-            stem = safe_name(source.stem, rules)
-            released = output_suffix(suffix)
-            destination = directory / f"{stem}_anonymizovano{released}"
-            if not directory.resolve().is_relative_to(target_root):
-                raise ValueError("Výstupní podsložka odkazuje mimo výstupní složku.")
-            directory.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(prefix=".spisredakt-", dir=directory) as scratch:
-                temporary = Path(scratch) / ("output" + released)
-                phase = "redact_and_validate"
-                attempts = 1
-                if audit:
-                    audit.record("processing", phase=phase, attempts=attempts, **fields)
-                with tempfile.TemporaryDirectory(prefix="SpisRedakt-input-") as private:
-                    staged = Path(private) / ("input" + suffix)
-                    staged.write_bytes(data)
+            with tempfile.TemporaryDirectory(prefix="SpisRedakt-input-") as private:
+                staged = Path(private) / "input"
+                with source.open("rb") as stream:
+                    if os.fstat(stream.fileno()).st_size > ARCHIVE_BYTES:
+                        raise FormatError("size_limit", "Vstup překračuje limit velikosti.")
+                    signed = has_signature(stream.read(HEADER_BYTES))
+                    if not signed and source.suffix.lower() not in SUPPORTED:
+                        if audit:
+                            audit.record("skipped", phase=phase, code="unsupported_format", attempts=0, **fields)
+                        continue
+                    stream.seek(0)
+                    # Without a binary signature the format follows the suffix (text, EML),
+                    # so its own limit applies before anything larger reaches the disk.
+                    size = copy_limited(stream, staged, ARCHIVE_BYTES if signed else size_limit(source.suffix.lower()))
+                suffix = identify(staged, source.suffix.lower())
+                if size > size_limit(suffix):
+                    raise FormatError("size_limit", "Vstup překračuje limit velikosti.")
+                if suffix is None and source.suffix.lower() in SUPPORTED:
+                    raise FormatError("invalid_signature", "Obsah neodpovídá deklarovanému formátu.")
+                if suffix not in SUPPORTED:
+                    if audit:
+                        audit.record("skipped", phase=phase, code="unsupported_format", attempts=0, **fields)
+                    continue
+                staged = staged.rename(staged.with_name("input" + suffix))
+                fields["format"] = suffix[1:].upper()
+                phase = "prepare"
+                directory = target_root.joinpath(*(safe_name(part, rules) for part in source.parent.relative_to(source_root).parts))
+                stem = safe_name(source.stem, rules)
+                released = output_suffix(suffix)
+                destination = directory / f"{stem}_anonymizovano{released}"
+                if not directory.resolve().is_relative_to(target_root):
+                    raise ValueError("Výstupní podsložka odkazuje mimo výstupní složku.")
+                directory.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryDirectory(prefix=".spisredakt-", dir=directory) as scratch:
+                    temporary = Path(scratch) / ("output" + released)
+                    phase = "redact_and_validate"
+                    attempts = 1
+                    if audit:
+                        audit.record("processing", phase=phase, attempts=attempts, **fields)
                     redact_file(staged, temporary, suffix, rules, tessdata)
-                phase = "publish"
-                while True:
-                    try:
-                        if os.name == "nt":
-                            temporary.rename(destination)
-                        else:
-                            os.link(temporary, destination)
-                        break
-                    except FileExistsError:
-                        collisions += 1
-                        destination = directory / f"{stem}_anonymizovano_{collisions + 1}{released}"
+                    phase = "publish"
+                    while True:
+                        try:
+                            if os.name == "nt":
+                                temporary.rename(destination)
+                            else:
+                                os.link(temporary, destination)
+                            break
+                        except FileExistsError:
+                            collisions += 1
+                            destination = directory / f"{stem}_anonymizovano_{collisions + 1}{released}"
         except Exception as error:
             if audit:
                 code = (error.code if isinstance(error, FormatError) else
@@ -99,6 +107,18 @@ def _process_folders(input_root, output_root, tessdata, audit, selected):
                              fallback="numbered_filename" if collisions else None,
                              collisions=collisions, **fields)
             yield source, destination, ""
+
+
+def copy_limited(stream, target, limit=ARCHIVE_BYTES, block=1 << 20):
+    """Copy a stream block by block and refuse it as soon as it exceeds the limit."""
+    size = 0
+    with open(target, "wb") as out:
+        while chunk := stream.read(block):
+            size += len(chunk)
+            if size > limit:
+                raise FormatError("size_limit", "Vstup překračuje limit velikosti.")
+            out.write(chunk)
+    return size
 
 
 def safe_name(value, rules):

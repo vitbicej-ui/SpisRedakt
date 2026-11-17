@@ -1054,6 +1054,74 @@ class ProcessingTests(unittest.TestCase):
         self.assertEqual(json.loads(log.splitlines()[-1])["counts"],
                          {"released": 1, "failed": 1, "skipped": 1})
 
+    def folders(self, name):
+        source, target = self.root / name / "in", self.root / name / "out"
+        source.mkdir(parents=True)
+        target.mkdir()
+        return source, target
+
+    def test_batch_rejects_large_text_without_loading_it(self):
+        import tracemalloc
+
+        source, target = self.folders("large")
+        with (source / "big.txt").open("wb") as f:
+            for _ in range(45):
+                f.write(b"a" * 1_000_000)
+        tracemalloc.start()
+        try:
+            results = list(process_folders(source, target))
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertEqual([r[1:] for r in results], [(None, "Vstup překračuje limit velikosti.")])
+        self.assertLess(peak, 8_000_000)
+        self.assertEqual(list(target.rglob("*")), [])
+
+    def test_batch_rejects_oversized_sparse_file_fast(self):
+        import time
+        from unittest import mock
+
+        source, target = self.folders("sparse")
+        with (source / "huge.pdf").open("wb") as f:
+            f.write(b"%PDF-")
+            f.truncate(600_000_000)
+        started = time.monotonic()
+        with mock.patch("anonymizer.batch.copy_limited") as copy:
+            results = list(process_folders(source, target))
+        self.assertFalse(copy.called)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual([r[1:] for r in results], [(None, "Vstup překračuje limit velikosti.")])
+
+    def test_batch_skips_unknown_sparse_file_without_copying(self):
+        from unittest import mock
+
+        source, target = self.folders("unknown")
+        with (source / "data.bin").open("wb") as f:
+            f.truncate(300_000_000)
+        audit = self.root / "unknown-audit"
+        with mock.patch("anonymizer.batch.copy_limited") as copy:
+            results = list(process_folders(source, target, audit_root=audit))
+        self.assertFalse(copy.called)
+        self.assertEqual(results, [])
+        self.assertEqual(list(target.rglob("*")), [])
+        log = next(audit.glob("*/events.jsonl")).read_text(encoding="utf-8")
+        self.assertIn('"skipped"', log)
+        self.assertIn("unsupported_format", log)
+
+    def test_identify_path_matches_bytes(self):
+        from anonymizer.formats import identify
+
+        docx = self.root / "a.docx"
+        doc = Document()
+        doc.add_paragraph("text")
+        doc.save(docx)
+        archive = self.root / "a.zip"
+        with ZipFile(archive, "w") as z:
+            z.writestr("x.txt", "text")
+        for path, expected in ((docx, ".docx"), (archive, ".zip")):
+            self.assertEqual(identify(path, ".bin"), expected)
+            self.assertEqual(identify(path.read_bytes(), ".bin"), expected)
+
 
 class AdviceTests(unittest.TestCase):
     def test_every_reason_has_advice(self):

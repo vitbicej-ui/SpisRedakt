@@ -46,11 +46,26 @@ class FormatError(ValueError):
         super().__init__(message)
 
 
+SIGNATURES = (b"%PDF-", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", b"{\\rtf", b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff",
+              b"BM", b"II*\x00", b"MM\x00*", b"PK\x03\x04", b"PK\x05\x06")
+HEADER_BYTES = 16
+
+
+def has_signature(head):
+    return head.startswith(SIGNATURES)
+
+
 def identify(data, suffix):
+    """Detect the format of bytes or of a file given as a Path (never reads a whole file into memory)."""
+    source = None
+    if isinstance(data, Path):
+        source = data
+        with source.open("rb") as stream:
+            data = stream.read(HEADER_BYTES)
     if data.startswith(b"%PDF-"):
         return ".pdf"
     if data.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
-        return identify_ole(data)
+        return identify_ole(source or data)
     if suffix == ".eml":
         return suffix
     if data.startswith(b"{\\rtf"):
@@ -60,7 +75,7 @@ def identify(data, suffix):
         if data.startswith(signature):
             return detected
     if data.startswith((b"PK\x03\x04", b"PK\x05\x06")):
-        with ZipFile(io.BytesIO(data)) as archive:
+        with ZipFile(source or io.BytesIO(data)) as archive:
             names = set(archive.namelist())
             for part, detected in (("word/document.xml", ".docx"), ("xl/workbook.xml", ".xlsx"),
                                    ("ppt/presentation.xml", ".pptx")):
@@ -78,12 +93,16 @@ def identify(data, suffix):
 
 
 def identify_ole(data):
-    """Tell Word, Excel and Outlook files apart by their compound-file streams."""
+    """Tell Word, Excel and Outlook files apart by their compound-file streams (bytes or Path)."""
     import olefile
 
     try:
-        with olefile.OleFileIO(io.BytesIO(data)) as ole:
-            names = {"/".join(entry) for entry in ole.listdir()}
+        if isinstance(data, Path):
+            with data.open("rb") as stream, olefile.OleFileIO(stream) as ole:
+                names = {"/".join(entry) for entry in ole.listdir()}
+        else:
+            with olefile.OleFileIO(io.BytesIO(data)) as ole:
+                names = {"/".join(entry) for entry in ole.listdir()}
     except OSError:
         return None
     if "WordDocument" in names:
