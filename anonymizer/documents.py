@@ -105,11 +105,41 @@ def blackout(pixmap, rectangle, matrix):
     return pixel_rect
 
 
+HYPHEN_BREAK = re.compile(r"-\n(?=[a-z\u00e1-\u017e])")
+
+
+def joined_view(text):
+    """Text with words joined across hyphenated line ends and other line breaks turned into spaces.
+
+    Returns the view and, for each of its characters, the index in ``text`` (a removed hyphen and
+    line break lie between the indexes of its neighbours), so a finding can be placed on the boxes.
+    """
+    pieces, indexes, position = [], [], 0
+    for match in HYPHEN_BREAK.finditer(text):
+        pieces.append(text[position:match.start()])
+        indexes.extend(range(position, match.start()))
+        position = match.end()
+    pieces.append(text[position:])
+    indexes.extend(range(position, len(text)))
+    view = "".join(pieces).replace("\n", " ")
+    return view, indexes
+
+
 def redact_geometry(pixmap, rules, text, geometry, transform):
     redacted = []
-    for item in rules.find(text):
+    spans = [(item.start, item.end) for item in rules.find(text)]
+    if "\n" in text:
+        # A name split by a hyphen at a line end, or a value that continues on the next line, is invisible
+        # to a search line by line: look again at the joined text and black out the boxes of every part.
+        view, indexes = joined_view(text)
+        spans += [(indexes[item.start], indexes[item.end - 1] + 1) for item in rules.find(view)]
+    covered = set()
+    for start, end in sorted(spans):
+        if (start, end) in covered:
+            continue
+        covered.add((start, end))
         lines = {}
-        for entry in geometry[item.start:item.end]:
+        for entry in geometry[start:end]:
             if entry is not None:
                 line_id, bbox = entry
                 lines[line_id] = lines.get(line_id, pdf.Rect()) | bbox

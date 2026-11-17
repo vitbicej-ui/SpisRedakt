@@ -26,7 +26,7 @@ needs_ocr = unittest.skipUnless(TESSDATA, "Chybí testovací jazyková data.")
 
 # Kinds that must have no leak in the output (ZIP and the unpacked batch). It is extended
 # in later tasks; the goal is every kind.
-ZERO_LEAK_KINDS = ("PRIJMENI", "RC", "NAROZENI", "ADRESA", "DOKLAD", "ICO")
+ZERO_LEAK_KINDS = tuple(KINDS)
 
 WOLF = Value("JMENO", "Tadeáš Wolf")
 WOLF_SURNAME = Value("PRIJMENI", "Wolf")

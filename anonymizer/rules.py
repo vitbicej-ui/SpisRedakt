@@ -2,7 +2,7 @@ import re
 import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from .czech import (LABEL, anchored, cls, colon_lines, contextual_findings, identity_family, structured_identity,
+from .czech import (LABEL, anchored, cls, contextual_findings, identity_family, structured_identity,
                     surface_surname)
 
 
@@ -14,11 +14,15 @@ RULES = {
     "EMAIL": r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+",
     "IBAN": r"(?<!\w)CZ(?:[ \t]?\d){22}(?![ \t]?\d)",
     "RC": r"(?<!\d)\d{6}[ \t]*/[ \t]*\d{3,4}(?!\d)",
-    "TELEFON": r"(?<![\w+])(?:\+420[ \t]*)?(?:[67]\d{2}(?:[ \t]?\d{3}){2}|[2-5]\d{2}(?:[ \t]\d{3}){2})(?!\d)",
-    "UCET": r"(?:účet|účtu|bankovní spojení|č\.[ \t]*ú\.)[ \t]*:?[ \t]*((?:\d{1,6}-)?\d{2,10}/\d{4})(?!\d)",
+    # A number may be broken by a line end, or written with hyphens or dots ("777-123-456", "777.123.456").
+    "TELEFON": (r"(?<![\w+])(?:\(?(?:\+|00)420\)?[ \t]*)?(?:"
+                r"[67]\d{2}(?:[ \t]?\n?[ \t]?\d{3}){2}|[2-5]\d{2}(?:[ \t]\n?[ \t]?\d{3}){2}|"
+                r"[2-7]\d{2}(?:[-.]\d{3}){2}|[2-7]\d{2}[ \t]?[-.][ \t]?\d{3}[ \t]?[-.][ \t]?\d{3})(?!\d)"),
+    # The label may end one line and the number start the next (text layers of PDF).
+    "UCET": r"(?:účet|účtu|bankovní\s+spojení|č\.\s*ú\.)\s*:?\s*((?:\d{1,6}-)?\d{2,10}/\d{4})(?!\d)",
     "DIC": r"\bCZ\d{8,10}\b",
-    "DOKLAD": r"(?:(?:OP|pas|doklad)[ \t]*(?:č\.[ \t]*)?:[ \t]*)([A-Z0-9]{6,12})\b",
-    "ICO": r"(?<!\w)IČO?[ \t]*:?[ \t]*((?:\d[ \t\u00a0]?){7}\d)(?![ \t\u00a0]?\d)",
+    "DOKLAD": r"(?:(?:OP|pas|doklad)\s*(?:č\.\s*)?:\s*)([A-Z0-9]{6,12})\b",
+    "ICO": r"(?<!\w)IČO?\s*:?\s*((?:\d[ \t\u00a0]?){7}\d)(?![ \t\u00a0]?\d)",
 }
 COMPILED = {kind: re.compile(pattern, re.IGNORECASE) for kind, pattern in RULES.items()}
 WHITESPACE = re.compile(r"\s")
@@ -26,6 +30,32 @@ LETTER_INITIAL = re.compile(r"\w\.")
 INITIALS = re.compile(r"((?:\w\. ?)+) (\S+)")
 EMAIL_RUN = re.compile(r"[\w.+-]+\Z")
 STRIPPED = {"IBAN", "RC", "TELEFON", "UCET", "NAROZENI"}
+NON_DIGIT = re.compile(r"\D")
+# OCR often reads "@" as "©" or "®" (and may add a stray letter after it); "(at)" is a common spelling.
+AT_LOOKALIKE = re.compile(r"(?<=[\w.+-])(?:[©®]|\((?:at|AT)\)|\[(?:at|AT)\])[ĎďĚě ]?(?=[\w-])")
+
+
+def lookalike_emails(text):
+    """E-mail matches in ``text`` with "@" lookalikes read as "@". Yields (start, end) in ``text``."""
+    if not ("©" in text or "®" in text or "(at)" in text.lower() or "[at]" in text.lower()):
+        return
+    view, starts, ends, position = [], [], [], 0
+    for match in AT_LOOKALIKE.finditer(text):
+        chunk = text[position:match.start()]
+        view.append(chunk)
+        starts += range(position, match.start())
+        ends += range(position + 1, match.start() + 1)
+        view.append("@")
+        starts.append(match.start())
+        ends.append(match.end())
+        position = match.end()
+    if not starts:
+        return
+    view.append(text[position:])
+    starts += range(position, len(text))
+    ends += range(position + 1, len(text) + 1)
+    for found in email_matches("".join(view)):
+        yield starts[found.start()], ends[found.end() - 1], found[0]
 
 
 def email_matches(text):
@@ -68,10 +98,12 @@ def rc_matches(text):
 
 
 CZ_START = re.compile(cls("c") + cls("z"))
-PHONE_START = re.compile(r"[+2-7]\d")
+PHONE_START = re.compile(r"\(?(?:\+|00)4|[2-7]\d")
 # úč, ban, č.
 ACCOUNT_START = re.compile(cls("účb") + "[" + cls("ča")[1:-1] + r".]")
 ICO_START = re.compile(cls("i") + cls("č"))
+# OP, pas, doklad
+DOKLAD_START = re.compile(cls("odp") + cls("pao"))
 SCANNERS = {
     "EMAIL": email_matches,
     "IBAN": lambda text: anchored(COMPILED["IBAN"], CZ_START, text),
@@ -79,7 +111,7 @@ SCANNERS = {
     "TELEFON": lambda text: anchored(COMPILED["TELEFON"], PHONE_START, text),
     "UCET": lambda text: anchored(COMPILED["UCET"], ACCOUNT_START, text),
     "DIC": lambda text: anchored(COMPILED["DIC"], CZ_START, text),
-    "DOKLAD": lambda text: colon_lines(COMPILED["DOKLAD"], text),
+    "DOKLAD": lambda text: anchored(COMPILED["DOKLAD"], DOKLAD_START, text),
     "ICO": lambda text: anchored(COMPILED["ICO"], ICO_START, text),
 }
 
@@ -130,8 +162,12 @@ class Rules:
                 if kind in STRIPPED:
                     identity = WHITESPACE.sub("", identity)
                 if kind == "TELEFON":
-                    identity = identity.removeprefix("+420")
+                    identity = NON_DIGIT.sub("", identity)
+                    if len(identity) > 9:
+                        identity = identity.removeprefix("00").removeprefix("420")
                 candidates.append((*match.span(group), kind, identity))
+        for start, end, shown in lookalike_emails(text):
+            candidates.append((start, end, "EMAIL", key(shown)))
         candidates.sort(key=lambda item: (item[0], item[0] - item[1]))
         merged = []
         for item in candidates:
