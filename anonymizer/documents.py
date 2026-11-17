@@ -136,6 +136,13 @@ def blank(page):
     return dark <= 0.002 * preview.width * preview.height
 
 
+def slovak_register(text):
+    """True for text that looks like a Slovak criminal-record extract or form (never released)."""
+    folded = "".join(c for c in unicodedata.normalize("NFD", text.casefold()) if not unicodedata.combining(c))
+    return bool(re.search(r"regist(?:er|r[aeiu]?)\s+trestov", folded)
+                or ("priezvisko" in folded and re.search(r"narodenia|ziadatel", folded)))
+
+
 def redact_pdf(source, destination, rules, tessdata=None, force_ocr=False):
     expected = []
     with pdf.open(source) as original, pdf.open() as output:
@@ -164,11 +171,7 @@ def redact_pdf(source, destination, rules, tessdata=None, force_ocr=False):
                     # personal data, so the whole page is blacked out.
                     pixmap.clear_with(0)
                     blacked = True
-            combined = " ".join(content for content, _, _ in sources)
-            folded = "".join(c for c in unicodedata.normalize("NFD", combined.casefold())
-                             if not unicodedata.combining(c))
-            if (re.search(r"regist(?:er|r[aeiu]?)\s+trestov", folded)
-                    or ("priezvisko" in folded and re.search(r"narodenia|ziadatel", folded))):
+            if slovak_register(" ".join(content for content, _, _ in sources)):
                 raise ValueError("Slovenský výpis nebo formulář nebyl vydán: rozložení osobních polí zatím nelze spolehlivě ověřit.")
             redacted = [pixmap.irect] if blacked else []
             for content, geometry, transform in sources:
