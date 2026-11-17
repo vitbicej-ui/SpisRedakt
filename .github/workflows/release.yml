@@ -1,0 +1,67 @@
+name: Release
+# Pushing a tag such as v0.9.0 builds the Windows package and publishes it as a
+# pre-release. The tag must match VERSION in anonymizer/audit.py.
+# It can also be started by hand from main (Actions → Release → Run workflow);
+# then the tag v<VERSION> is created on the tested commit.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Tag matches application version
+        id: version
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path anonymizer/audit.py -Pattern 'VERSION = "(.+)"').Matches[0].Groups[1].Value
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            if ($env:GITHUB_REF_NAME -ne 'main') { throw 'Manual releases are built from main only.' }
+            $tag = "v$version"
+          } else {
+            $tag = $env:GITHUB_REF_NAME
+            if ("v$version" -ne $tag) { throw "Tag $tag does not match VERSION $version." }
+          }
+          "tag=$tag" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - run: python -m pip install -r requirements-build.txt
+      - name: Czech OCR data
+        shell: pwsh
+        run: ./scripts/get-ocr.ps1
+      - name: Regression tests
+        shell: pwsh
+        run: |
+          $env:SPISREDAKT_TEST_TESSDATA = (Resolve-Path tessdata).Path
+          python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Package and verify
+        shell: pwsh
+        run: ./scripts/build-windows.ps1
+      - name: Publish pre-release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ steps.version.outputs.tag }}'
+          $archive = "SpisRedakt-$tag-Windows-x64.zip"
+          Compress-Archive -Path dist/SpisRedakt/* -DestinationPath $archive
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+          "SHA-256: $hash`n`nPostup ručního testu je v TESTOVANI.md." | Out-File notes.md -Encoding utf8
+          # --target creates the tag on this commit when it does not exist yet.
+          gh release create $tag $archive --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --prerelease `
+            --title "SpisRedakt $tag" --notes-file notes.md

@@ -1,0 +1,27 @@
+name: Outputs in LibreOffice
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  libreoffice:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: LibreOffice and Qt libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libreoffice-writer libreoffice-calc \
+            libegl1 libgl1 libxkbcommon0 libfontconfig1
+      - run: python -m pip install -r requirements-build.txt
+      - name: Redact synthetic files and reopen them in LibreOffice
+        run: python scripts/check_outputs.py
