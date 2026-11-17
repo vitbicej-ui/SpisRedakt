@@ -12,15 +12,17 @@ Pořadí je priorita. Orchestrátor bere úkoly shora, stav zapisuje sem: `[ ]` 
 
 ## Kontrola výstupů
 
-- [ ] **Linuxový CI job s LibreOffice.** Otevřít syntetické výstupy (DOCX, XLSX, PPTX, ODT, RTF) v LibreOffice headless a ověřit, že se převedou bez chyby. Úprava workflow vyžaduje lidskou kontrolu, proto ji připrav jako samostatný commit a v backlogu ji označ `[?]`.
+- [x] **Linuxový CI job s LibreOffice.** `scripts/check_outputs.py` a workflow `outputs.yml` (schváleno 17. 11. 2026). Rozšířit o PPTX/ODP a e-maily může orchestrátor úpravou skriptu, ne workflow.
 - [ ] **Regresní korpus.** Rozšířit syntetické testy o smíšené skeny, obtížná písma, zalomení řádků a typické soudní šablony (záhlaví, zápatí, doložka „Shodu s prvopisem potvrzuje“).
 
 ## Funkce
 
 - [ ] **Náhled v GUI.** Zobrazit originál a výstup vedle sebe po stránkách, bez ukládání dalších kopií.
 - [ ] **Ruční vyznačení ploch.** V náhledu PDF nebo obrázku umožnit doplnit začernění myší a výstup znovu ověřit.
-- [?] **Jednotné pseudonymy mezi dávkami.** Vyžaduje rozhodnutí: kde a jak šifrovaně uchovat mapu štítků, aby neobsahovala čitelné osobní údaje.
-- [?] **Automatické vydání podle štítku.** Workflow, které po pushnutí štítku `v*` založí GitHub Release se sestavením. Vyžaduje lidskou kontrolu oprávnění.
+- [ ] **Jednotné pseudonymy mezi dávkami** (rozhodnuto 17. 11. 2026: varianta B). Mapa se ukládá do výstupní složky spisu (`.spisredakt-mapa`). Neobsahuje jména, jen HMAC-SHA256 otisky normalizované identity (`druh + identity`) a k nim štítky a čítače. Klíč HMAC je náhodný, chráněný Windows DPAPI (CryptProtectData přes ctypes, bez nové závislosti) a uložený vedle mapy. Mimo Windows nebo při chybě DPAPI se mapa nepoužije a dávka běží jako dnes. Spojování iniciál se známými jmény musí fungovat i z mapy. Testy: dvě dávky do stejné výstupní složky dají stejné štítky a soubor mapy neobsahuje čitelné identity.
+- [x] **Automatické vydání podle štítku.** Workflow `release.yml` (schváleno 17. 11. 2026). Štítek musí odpovídat `VERSION`. Štítky vytváří jen člověk.
+
+- [ ] **Věrný převod DOC a XLS přes nainstalovaný Office** (rozhodnuto 17. 11. 2026: varianta B). Volba v GUI „Převádět DOC/XLS přes Word nebo LibreOffice“, výchozí stav vypnuto, uložená v nastavení aplikace. Když je zapnutá a na počítači je Word nebo Excel (COM přes ctypes/comtypes jen se schválenou závislostí, jinak `soffice --headless --convert-to`, nalezený v obvyklých cestách), převést soubor na DOCX/XLSX v dočasné složce a pokračovat běžnou cestou Office. Bez nalezeného programu nebo při chybě použít dnešní vlastní převod. Žádná síť, žádné makro, převod s vypnutými makry a aktualizacemi odkazů. Novou závislost (např. pywin32) označ `[?]`.
 
 ## Hotovo
 
