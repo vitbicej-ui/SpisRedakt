@@ -588,6 +588,93 @@ class ProcessingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "objekt"):
             redact_rtf(rb"{\rtf1{\object\objemb{\*\objdata 00}}\par}", Rules())
 
+    def test_rtf_tables_use_headers_and_form_labels(self):
+        from anonymizer.rtf import collect, parse, redact_rtf
+        from anonymizer.formats import redact_file
+
+        def row(*cells):
+            body = rb"\trowd\cellx2000\cellx4000\cellx6000" b"\n"
+            for cell in cells:
+                body += rb"\pard\intbl " + cell + rb"\cell" + b"\n"
+            return body + rb"\row" + b"\n"
+
+        head = rb"{\rtf1\ansi\ansicpg1250\deff0{\fonttbl{\f0 Calibri;}}" b"\n"
+        table = (rb"Pred tabulkou\par" b"\n"
+                 + row(rb"{\b Jm\'e9no}", rb"Telefon", rb"Pozn\'e1mka")
+                 + row(rb"{\b Xaver Blum}", rb"777 123 456", rb"bez pozn\'e1mky")
+                 + rb"\pard Za tabulkou\par}")
+        output = redact_rtf(head + table, Rules())
+        self.assertNotIn(b"Xaver", output)
+        self.assertNotIn(b"Blum", output)
+        self.assertIn(b"[OSOBA-", output)
+        self.assertIn(b"[TELEFON-1]", output)
+        self.assertIn(b"bez pozn\\'e1mky", output)
+        self.assertIn(rb"\trowd\cellx2000\cellx4000\cellx6000", output)
+        self.assertIn(rb"{\b [OSOBA-", output)
+        self.assertIn(b"Za tabulkou", output)
+        collect(parse(output))
+
+        form = (head + row(rb"Rodn\'e9 \'e8\'edslo:", rb"800101/1234", b"")
+                + row(rb"Jm\'e9no", rb"Xaver Blum", b"") + rb"\pard\par}")
+        output = redact_rtf(form, Rules())
+        self.assertNotIn(b"800101", output)
+        self.assertNotIn(b"Blum", output)
+        self.assertIn(b"[RC-1]", output)
+        self.assertIn(b"[OSOBA-", output)
+
+        split = head + row(rb"Jm\'e9no", b"", b"") + row(rb"Xaver\par Blum", b"", b"") + rb"\pard\par}"
+        output = redact_rtf(split, Rules())
+        self.assertNotIn(b"Xaver", output)
+        self.assertNotIn(b"Blum", output)
+        self.assertEqual(output.count(b"[OSOBA-1]"), 1)
+
+        grouped = (head + rb"\trowd\cellx3000\cellx6000" b"\n"
+                   rb"\pard\intbl {Jm\'e9no\cell}{Telefon\cell}\row" b"\n"
+                   rb"\trowd\cellx3000\cellx6000" b"\n"
+                   rb"\pard\intbl {Xaver Blum\cell}{777 123 456\cell}\row\pard Konec\par}")
+        output = redact_rtf(grouped, Rules())
+        self.assertNotIn(b"Blum", output)
+        self.assertIn(b"[OSOBA-1]", output)
+        self.assertIn(b"Konec", output)
+
+        nested = (head + row(rb"Jm\'e9no", rb"Telefon", b"")
+                  + rb"\trowd\cellx2000\cellx4000" b"\n"
+                  rb"\pard\intbl Xaver Blum\par" b"\n"
+                  rb"\pard\intbl\itap2 Jan Tester 777 123 456\nestcell"
+                  rb"{\*\nesttableprops\trowd\cellx1000\nestrow}"
+                  rb"\pard\intbl\cell\pard\intbl x\cell\row\pard\par}")
+        output = redact_rtf(nested, Rules())
+        self.assertNotIn(b"777 123", output)
+        self.assertNotIn(b"Blum", output)
+        collect(parse(output))
+
+        with tempfile.TemporaryDirectory() as directory:
+            source, target = Path(directory, "a.rtf"), Path(directory, "b.rtf")
+            source.write_bytes(head + table)
+            redact_file(source, target, ".rtf", Rules(), None)
+            self.assertNotIn(b"Blum", target.read_bytes())
+
+    def test_rtf_adjacent_tables_are_planned_separately(self):
+        from anonymizer.rtf import redact_rtf
+
+        def row(edges, *cells):
+            body = rb"\trowd" + b"".join(rb"\cellx%d" % edge for edge in edges) + b"\n"
+            for cell in cells:
+                body += rb"\pard\intbl " + cell + rb"\cell" + b"\n"
+            return body + rb"\row" + b"\n"
+
+        columns, form = (1000, 2000, 3000), (1500, 3000)
+        document = (rb"{\rtf1\ansi\ansicpg1250\deff0{\fonttbl{\f0 Calibri;}}" b"\n"
+                    + row(columns, rb"Jm\'e9no", rb"Telefon", rb"Pozn\'e1mka")
+                    + row(columns, rb"Xaver\par Blum", rb"777 123 456", rb"bez pozn\'e1mky")
+                    + row(form, rb"Rodn\'e9 \'e8\'edslo:", rb"800101/1234")
+                    + row(form, rb"Jm\'e9no", rb"Oto Kramerius") + rb"\pard\par}")
+        output = redact_rtf(document, Rules())
+        for word in (b"Xaver", b"Blum", b"Kramerius", b"800101", b"777 123"):
+            self.assertNotIn(word, output)
+        self.assertIn(b"bez pozn\\'e1mky", output)
+        self.assertEqual(output.count(b"[OSOBA-"), 2)
+
     def test_opendocument_text_and_spreadsheet(self):
         from anonymizer.formats import identify, redact_file
 

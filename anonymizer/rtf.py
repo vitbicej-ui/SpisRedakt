@@ -8,6 +8,8 @@ pictures are redacted like other images and unknown objects stop processing.
 """
 import re
 
+from .czech import plan_table
+
 TOKEN = re.compile(rb"\\([a-zA-Z]{1,32})(-?\d{1,10})? ?|\\'([0-9a-fA-F]{2})|\\([^a-zA-Z])|([{}])|(\r\n|\r|\n)|([^\\{}\r\n]+)")
 DISABLED_LINK = "https://example.invalid/"
 # Destinations removed from the output entirely.
@@ -24,6 +26,67 @@ NONTEXT = {"fonttbl", "colortbl", "stylesheet", "listtable", "listoverridetable"
 BREAKS = {"par", "cell", "row", "sect", "page", "nestcell", "nestrow"}
 SPACES = {"line": " ", "tab": " ", "emdash": "—", "endash": "–", "lquote": "‘", "rquote": "’",
           "ldblquote": "“", "rdblquote": "”", "bullet": "•", "~": "\u00a0"}
+
+
+class Tables:
+    """Table structure seen while walking: cells are lists of blocks.
+
+    The state is shared by all groups, because ``\\cell`` is often written
+    inside braces. Content that cannot be assigned reliably to a cell is left
+    to the text rules.
+    """
+
+    def __init__(self):
+        self.tables, self.rows, self.row, self.cell = [], [], [], []
+        self.edges, self.keys = [], []
+        self.intbl = self.in_row = False
+        self.itap, self.tainted, self.pending = 1, False, None
+
+    def active(self):
+        return self.intbl or self.in_row
+
+    def close(self):
+        if self.rows and not self.tainted:
+            self.tables.append((self.rows, self.keys))
+        self.rows, self.row, self.cell, self.tainted = [], [], [], False
+        self.keys = []
+
+    def note(self, block):
+        if not self.active():
+            self.close()
+        elif not self.cell or self.cell[-1] is not block:
+            self.cell.append(block)
+
+    def word(self, name):
+        if name == "pard":
+            self.intbl, self.itap = False, 1
+        elif name == "intbl":
+            self.intbl = True
+        elif name == "trowd":
+            self.in_row = True
+            self.edges = []
+        elif name == "cellx":
+            self.edges.append(self.pending)
+        elif name == "par":
+            if not self.active():
+                self.close()
+        elif name in ("cell", "row"):
+            if self.itap > 1:
+                self.tainted = True
+            self.itap = 1
+            if name == "cell":
+                self.row.append(self.cell)
+                self.cell = []
+            else:
+                self.rows.append(self.row)
+                self.keys.append((len(self.row), tuple(self.edges)))
+                self.row, self.cell = [], []
+                self.in_row = self.intbl = False
+
+    def param(self, name, value):
+        self.pending = value
+        if name == "itap" and value is not None:
+            self.itap = value
 
 
 class Token:
@@ -128,6 +191,8 @@ def walk(group, state, blocks, checked, pictures):
         pictures.append(group)
         return
     state = dict(state)
+    if name == "nesttableprops":
+        state["nest"] = True
     if name in VISIBLE:
         state["visible"] = True
         blocks.append([])
@@ -141,6 +206,7 @@ def walk(group, state, blocks, checked, pictures):
         if state["target"] is not None:
             state["target"].append((char, token, offset))
         elif state["visible"]:
+            state["tables"].note(blocks[-1])
             blocks[-1].append((char, token, offset))
 
     pending, owner = 0, None
@@ -148,6 +214,9 @@ def walk(group, state, blocks, checked, pictures):
         if isinstance(child, Group):
             walk(child, state, blocks, checked, pictures)
             continue
+        if child.kind == "word" and not state.get("nest"):
+            state["tables"].param(child.name, child.param)
+            state["tables"].word(child.name)
         if child.kind == "text":
             for offset, byte in enumerate(child.raw):
                 if pending:
@@ -210,18 +279,45 @@ def set_text(token, offset, value):
 
 
 def collect(document):
-    blocks, checked, pictures = [[]], [], []
-    walk(document, {"visible": True, "uc": 1, "codepage": codepage(document), "target": None},
-         blocks, checked, pictures)
-    return blocks, checked, pictures
+    blocks, checked, pictures, tables = [[]], [], [], Tables()
+    walk(document, {"visible": True, "uc": 1, "codepage": codepage(document), "target": None,
+                    "tables": tables}, blocks, checked, pictures)
+    tables.close()
+    return blocks, checked, pictures, tables.tables
 
 
 def redact_rtf(data, rules, tessdata=None, redact_image=None):
     document = parse(data)
-    blocks, checked, pictures = collect(document)
+    blocks, checked, pictures, tables = collect(document)
     if pictures:
         redact_pictures(pictures, rules, tessdata, redact_image)
+    labelled = set()
+    for rows, keys in tables:
+        texts = [[" ".join(t for t in ("".join(char for char, _, _ in block).strip() for block in cell) if t)
+                  for cell in row] for row in rows]
+        plan = plan_table([list(enumerate(row)) for row in texts])
+        # Rows of different shape may be separate tables written back to back:
+        # a cell is labelled when the whole table or any such section marks it.
+        start = 0
+        for end in range(1, len(rows) + 1):
+            if end == len(rows) or keys[end] != keys[start]:
+                if (start, end) != (0, len(rows)):
+                    part = plan_table([list(enumerate(row)) for row in texts[start:end]])
+                    for (index, position), kind in part.items():
+                        plan.setdefault((start + index, position), kind)
+                start = end
+        for (index, position), kind in plan.items():
+            cell = rows[index][position]
+            label = rules.cell(kind, texts[index][position])
+            if not label:
+                continue
+            chars = [item for block in cell for item in block]
+            for number, (_, token, offset) in enumerate(chars):
+                set_text(token, offset, label if number == 0 else "")
+            labelled.update(id(block) for block in cell)
     for block in blocks:
+        if id(block) in labelled:
+            continue
         text = "".join(char for char, _, _ in block)
         for match in reversed(rules.find(text)):
             label = rules.label(match)
@@ -237,7 +333,7 @@ def redact_rtf(data, rules, tessdata=None, redact_image=None):
             raise ValueError("Citlivý údaj je ve skryté části RTF (pole, záložka nebo rejstřík).")
     output = document.raw()
     # Re-read the result: nothing the rules recognise may remain visible.
-    blocks, checked, _ = collect(parse(output))
+    blocks, checked, _, _ = collect(parse(output))
     for block in blocks + [items for _, items in checked]:
         if rules.find("".join(char for char, _, _ in block)):
             raise ValueError("Kontrola výstupu RTF našla zbývající údaj.")
