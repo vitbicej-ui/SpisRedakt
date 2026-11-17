@@ -8,7 +8,8 @@ Pořadí je priorita. Orchestrátor bere úkoly shora, stav zapisuje sem: `[ ]` 
 - [x] **Paměť u velkých vstupů.** (d0519bc) `batch.py` čte celý soubor do paměti (až 500 MB). Rozpoznat formát z hlavičky nebo cesty a soubor kopírovat po blocích.
 - [x] **Výkon pravidel.** (df4a646, 1,7–2,8×) `Rules.find` zpracuje asi 1 MB textu za sekundu. Profilovat `contextual_findings` a zrychlit bez změny výsledků.
 - [x] **Přesné tabulky v DOC.** (c78c7ab; víceřádkový nadpis buňky se zatím nerozpozná jako nadpis sloupce) `legacy.py` skládá tabulky heuristicky. Použít vlastnosti odstavců (PlcBtePapx, sprmPFInTable), aby se víceodstavcové buňky nerozpadaly.
-- [ ] **Nadpisy sloupců v RTF tabulkách.** Napojit `plan_table` na buňky RTF (`\cell`, `\row`).
+- [x] **Nadpisy sloupců v RTF tabulkách.** (7561d5e) Napojit `plan_table` na buňky RTF (`\cell`, `\row`).
+- [ ] **Víceřádkové nadpisy sloupců.** Nadpis buňky rozdělený do odstavců (např. „Jméno“ / „a příjmení“) se nerozpozná jako sloupec jmen v DOC, DOCX, ODT ani RTF. Normalizovat zalomení v `column_kind`, aby se hodnoty pod takovým nadpisem označily.
 
 ## Kontrola výstupů
 
