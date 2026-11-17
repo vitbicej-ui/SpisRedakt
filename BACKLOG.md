@@ -2,6 +2,19 @@
 
 Pořadí je priorita. Orchestrátor bere úkoly shora, stav zapisuje sem: `[ ]` čeká, `[~]` rozpracováno, `[x]` hotovo (s commitem), `[?]` čeká na rozhodnutí člověka.
 
+## Produkce: spis do cloudového modelu
+
+Cíl běhu 17. 11. 2026 (termín 18. 11.): jeden ZIP se spisem → `spis_anonymizovano.md` pro jazykové modely v cloudu. Tato sekce má přednost před ostatními. Náhled v GUI, ruční vyznačení ploch, jednotné pseudonymy mezi dávkami a převod přes Office jsou do té doby odloženy.
+
+- [~] **0. Syntetický spis a detektor úniků.** Generátor syntetického ZIPu se všemi formáty a soudními šablonami, nezávislý detektor úniků (všechny vrstvy výstupu, varianty bez diakritiky, verzálkami, s mezerami, v pádech), vypisuje jen počty podle druhu.
+- [~] **1. Samotná příjmení v celém spisu.** Dvoufázové zpracování ZIPu i dávky, příjmení ve všech pádech a obou rodech, „pan/paní + slovo s velkým písmenem“ jako osoba.
+- [~] **2. Úsporný Markdown spisu.** `spis_anonymizovano.md`: extrakce všech textů, čištění OCR, dvoufázová anonymizace, deterministické úspory (záhlaví/zápatí, duplicity, opakované odstavce, citované e-maily, krátké štítky), legenda, obsah s odhadem tokenů, kontrola před vydáním. Volby v GUI „Vytvořit také anonymizovaný ZIP pro kontrolu“ a „Rozdělit po dokumentech“ (výchozí vypnuto).
+- [ ] **3. Víceřádkové nadpisy sloupců.** Viz položka v sekci Robustnost; nově i XLSX a Markdown.
+- [ ] **4. Vydání spisu bez odmítnutých položek.** Markdown a kontrolní ZIP bez odmítnutých položek, seznam nezpracovaných položek (pořadí + kód), `NEZPRACOVANO.txt`, hlášení v GUI a auditu, README.
+- [ ] **5. Bezpečné výchozí chování.** Kontrolní ZIP bez metadat a původních názvů, skryté listy/řádky/sloupce XLSX, obrázky bez textu začerněné celé, v Markdownu vynechané.
+- [ ] **6. Výkon na velkém spisu.** ZIP ~200 MB / ~300 stran skenů, proudové čtení položek, průběh v GUI, změřený čas.
+- [ ] **7. README a GUI.** Sekce „Výstup pro jazykové modely v cloudu“, souhrn po dokončení, nové rady v `ADVICE`.
+
 ## Robustnost u skutečných spisů
 
 - [x] **Důvod chyby v GUI.** (8e048ac) U odmítnutého souboru zobrazit srozumitelnou radu podle kódu z `anonymizer/reasons.py` (např. „Odstraňte makra a uložte znovu jako DOCX“).
@@ -9,7 +22,7 @@ Pořadí je priorita. Orchestrátor bere úkoly shora, stav zapisuje sem: `[ ]` 
 - [x] **Výkon pravidel.** (df4a646, 1,7–2,8×) `Rules.find` zpracuje asi 1 MB textu za sekundu. Profilovat `contextual_findings` a zrychlit bez změny výsledků.
 - [x] **Přesné tabulky v DOC.** (c78c7ab; víceřádkový nadpis buňky se zatím nerozpozná jako nadpis sloupce) `legacy.py` skládá tabulky heuristicky. Použít vlastnosti odstavců (PlcBtePapx, sprmPFInTable), aby se víceodstavcové buňky nerozpadaly.
 - [x] **Nadpisy sloupců v RTF tabulkách.** (7561d5e) Napojit `plan_table` na buňky RTF (`\cell`, `\row`).
-- [ ] **Víceřádkové nadpisy sloupců.** Nadpis buňky rozdělený do odstavců (např. „Jméno“ / „a příjmení“) se nerozpozná jako sloupec jmen v DOC, DOCX, ODT ani RTF. Normalizovat zalomení v `column_kind`, aby se hodnoty pod takovým nadpisem označily.
+- [~] **Víceřádkové nadpisy sloupců.** (= úkol 3 výše) Nadpis buňky rozdělený do odstavců (např. „Jméno“ / „a příjmení“) se nerozpozná jako sloupec jmen v DOC, DOCX, ODT ani RTF. Normalizovat zalomení v `column_kind`, aby se hodnoty pod takovým nadpisem označily.
 
 ## Kontrola výstupů
 
