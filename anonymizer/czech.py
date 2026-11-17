@@ -66,6 +66,12 @@ for canonical, forms, feminine in generated():
         if canonical not in GIVEN.setdefault(form, []):
             GIVEN[form].append(canonical)
 
+# canonical given name -> every form (case) of it
+GIVEN_FORMS = {}
+for _form, _canonicals in GIVEN.items():
+    for _canonical in _canonicals:
+        GIVEN_FORMS.setdefault(_canonical, set()).add(_form)
+
 FEMININE = set("anna jana eva petra marie lucie hana alena kateřina tereza veronika lenka barbora ivana jitka martina markéta eliška kristýna".split())
 FEMININE.update(canonical for canonical, _, feminine in generated() if feminine)
 FEMININE.update("václava šárka zuzana monika simona michaela dominika".split())
@@ -219,8 +225,10 @@ ROLE_PREFIXES = ("dědic", "účastník", "klient", "notář", "svědk", "svěde
                  "obžalovan", "obviněn", "poškozen", "advokát", "zástupc", "manžel", "zastoupen", "podepsal")
 ROLE_NOT = ("dědictv", "manželstv", "advokátn", "zástupn", "klientsk", "poškozov")
 TITLE_WORDS = frozenset("judr mudr phdr mgr ing bc bca dr prof doc mba dis csc thdr rndr pharmdr paeddr mvdr ph".split())
+COMMON_GIVEN = frozenset("dana dany danou věra věru věry věře věrou".split())
 ROLE_ALT = (r"(?:pan(?:a|em|u|í|ovi)?(?![^\W\d_])|paní(?![^\W\d_])|pozůstalost\w*[ \t\n]+po(?![^\W\d_])|(?:"
             + "|".join(ROLE_PREFIXES) + r")\w*)")
+ROLE_ALT_FULL = re.compile(ROLE_ALT)
 GAP = r"(?:[ \t\n]*:[ \t\n]*|[ \t\n]+)"
 TITLE_ALT = r"(?:" + "|".join(sorted(TITLE_WORDS, key=len, reverse=True)) + r")\.[ \t\n]*"
 LEFT = r"(?<![^\W\d_])"
@@ -279,6 +287,48 @@ def sentence_start(text, position):
     return False
 
 
+# Capitalised words that may precede a surname without being a given name ("Podle Nováka", "Svědek Novák").
+BEFORE_SURNAME_NOT = frozenset("""pan paní pani slečna podle proti dle také dále potom pak když že jak kde kdy ale nebo
+již jen tedy tak toto tento tato ten tito ti tyto pro před přes při nad pod mezi bez kromě vůči ohledně dne
+obhájce obhájkyně soudce soudkyně advokát advokátka zástupce zástupkyně jednatel jednatelka ředitel ředitelka
+vedoucí odvolatel odvolatelka dlužník dlužnice věřitel věřitelka pachatel poškozený poškozená""".split())
+WORD_BEFORE = re.compile(rf"(?<![^\W\d_])[{CAPITALS}][^\W\d_]*(?:-[^\W\d_]+)*(?=[ \t]+\Z)")
+
+
+def given_before(text, start):
+    """Start of a capitalised word that directly precedes a known surname at ``start`` and may be a given name."""
+    found = WORD_BEFORE.search(text, max(0, start - 40), start)
+    if not found:
+        return start
+    word = found.group()
+    folded = word.casefold()
+    if (len(word) < 3 or word.isupper() or folded in BEFORE_SURNAME_NOT or folded in NAME_STOP
+            or folded in NOT_SURNAME or folded in TITLE_WORDS
+            or (ROLE_ALT_FULL.fullmatch(folded) and not folded.startswith(ROLE_NOT))):
+        return start
+    return found.start()
+
+
+def given_findings(text, forms):
+    """Find known given names (``forms``: form -> identity) written as a capitalised word of their own.
+
+    A word at the start of a sentence counts only when a comma follows it ("Ilona, děkuji") or the
+    form is not an ordinary word.
+    """
+    for word in CAP_WORD.finditer(text):
+        identity = forms.get(word.group().casefold())
+        if not identity:
+            continue
+        start, end = word.span()
+        if (start and text[start - 1] == "[") or text[end:end + 1] == "-" or text[end:end + 2] == "]":
+            continue
+        if INSTITUTION_BEFORE.search(text, max(0, start - 40), start):
+            continue
+        if sentence_start(text, start) and text[end:end + 1] != "," and word.group().casefold() in COMMON_GIVEN:
+            continue
+        yield start, end, "OSOBA", identity
+
+
 def family_findings(text, families, local, contexts=True):
     """Find every known surname (any case, either gender) and surnames named by a context.
 
@@ -329,7 +379,8 @@ def family_findings(text, families, local, contexts=True):
             continue
         if found[0] in COMMON_KEYS and sentence_start(text, start) and not person_before(text, start, end):
             continue
-        yield start, end, "OSOBA", f"~{found[0]}|{found[1] or ''}"
+        # "Vojmír Kvasnička": a capitalised word right before the surname is most likely its given name.
+        yield given_before(text, start), end, "OSOBA", f"~{found[0]}|{found[1] or ''}"
 
 
 CITY = rf"(?:{CAP})(?:{SPACE}(?:(?:nad|pod|u|na|ve|v|a){SPACE})?{CAP}){{0,3}}"
@@ -473,7 +524,7 @@ def company_matches(text):
                 position = word.start() + 1
 
 
-def contextual_findings(text, known_surnames=(), families=(), contexts=True):
+def contextual_findings(text, known_surnames=(), families=(), contexts=True, given=None):
     for match in company_matches(text):
         yield *match.span(1), "ORGANIZACE", match[1]
     for match in colon_lines(SLOVAK_FIELD, text):
@@ -522,6 +573,8 @@ def contextual_findings(text, known_surnames=(), families=(), contexts=True):
         local.update(key for key, _ in identity_family(item[3])[0])
         yield item
     yield from family_findings(text, families, local, contexts)
+    if given:
+        yield from given_findings(text, given)
 
 
 INITIALS = rf"(?:[{UPPER}]\.[ \t]?){{1,2}}"

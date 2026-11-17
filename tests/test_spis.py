@@ -24,9 +24,10 @@ import synthetic_spis as spis
 TESSDATA = os.environ.get("SPISREDAKT_TEST_TESSDATA")
 needs_ocr = unittest.skipUnless(TESSDATA, "Chybí testovací jazyková data.")
 
-# Kinds that must have no leak in the output (ZIP and the unpacked batch). It is extended
-# in later tasks; the goal is every kind.
+# Kinds that must have no leak in the output (ZIP and the unpacked batch): every kind,
+# including a lone given name of a known person.
 ZERO_LEAK_KINDS = tuple(KINDS)
+assert "KRESTNI" in ZERO_LEAK_KINDS
 
 WOLF = Value("JMENO", "Tadeáš Wolf")
 WOLF_SURNAME = Value("PRIJMENI", "Wolf")
@@ -258,7 +259,7 @@ class GeneratorTests(unittest.TestCase):
         self.assertEqual({value.kind for value in self.values}, set(KINDS))
         people = {person.last for person in spis.PEOPLE.values()}
         self.assertGreaterEqual(len(people), 8)
-        self.assertEqual([value.text for value in self.values if value.common], ["Malý"])
+        self.assertEqual([value.text for value in self.values if value.common], ["Jan", "Malý"])
         # Every value is found in a text layer (the images carry only a part of them).
         texts = list(layers_of_bytes(self.target.read_bytes(), "spis.zip"))
         missing = [value.kind for value in self.values if not scan_texts(texts, [value])]

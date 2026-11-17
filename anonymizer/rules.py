@@ -2,8 +2,8 @@ import re
 import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from .czech import (LABEL, anchored, cls, contextual_findings, identity_family, structured_identity,
-                    surface_surname)
+from .czech import (GIVEN, GIVEN_FORMS, INITIAL_WORD, LABEL, anchored, cls, contextual_findings,
+                    identity_family, structured_identity, surface_surname)
 
 
 def key(value):
@@ -132,6 +132,9 @@ class Rules:
         self.counts = Counter()
         # family key -> [(gender, label)] of every person known by that surname
         self.families = {}
+        # given name form (any case) -> canonical given names; canonical -> labels of the persons that have it
+        self.given_forms = {}
+        self.given_labels = {}
         # labels that so far stand for a bare surname only
         self.bare = set()
         # kind -> original strings found. Memory only: never written, logged or put into a message.
@@ -150,7 +153,8 @@ class Rules:
 
     def find(self, text, contexts=True):
         candidates = [(start, end, kind, key(identity))
-                      for start, end, kind, identity in contextual_findings(text, self.surnames, self.families, contexts)]
+                      for start, end, kind, identity in contextual_findings(
+                          text, self.surnames, self.families, contexts, self.given_identities())]
         if self.custom:
             for match in self.custom.finditer(text):
                 variant = self.variants[match.lastindex - 1]
@@ -193,6 +197,35 @@ class Rules:
             surname = surface_surname(surface)
             if surname:
                 self.surfaces["PRIJMENI"].add(surname)
+
+    def given_identities(self):
+        """Form -> identity ("!canonical|…") of the given names of the persons known by a full name."""
+        return {form: "!" + "|".join(sorted(canonicals)) for form, canonicals in self.given_forms.items()}
+
+    def register_given(self, identity, label):
+        """Remember the given name of a person known by a full name ("jan novák" -> every form of "jan")."""
+        tokens = [token for token in identity.split() if not INITIAL_WORD.fullmatch(token)]
+        if len(tokens) < 2:
+            return
+        first = tokens[0]
+        if tokens[-1] in GIVEN and first not in GIVEN:
+            first = tokens[-1]
+        for canonical in GIVEN.get(first, [first]):
+            if label not in self.given_labels.setdefault(canonical, []):
+                self.given_labels[canonical].append(label)
+            for form in set(GIVEN_FORMS.get(canonical, ())) | {first, canonical}:
+                self.given_forms.setdefault(form, set()).add(canonical)
+
+    def given_label(self, identity):
+        """Label of a lone given name: that of the one person known with it, else one label for all of them."""
+        labels = []
+        for canonical in identity[1:].split("|"):
+            labels += [known for known in self.given_labels.get(canonical, ()) if known not in labels]
+        if len(labels) == 1:
+            return labels[0]
+        if ("OSOBA", identity) not in self.labels:
+            self.labels["OSOBA", identity] = self.label_for("OSOBA")
+        return self.labels["OSOBA", identity]
 
     def label_for(self, kind):
         self.counts[kind] += 1
@@ -238,6 +271,8 @@ class Rules:
 
     def label(self, item):
         identity = (item.kind, item.identity)
+        if item.kind == "OSOBA" and item.identity.startswith("!"):
+            return self.given_label(item.identity)
         if item.kind == "OSOBA" and item.identity.startswith("~") and "|" in item.identity:
             return self.surname_label(item.identity)
         person = item.kind == "OSOBA" and identity not in self.labels
@@ -265,6 +300,8 @@ class Rules:
             self.labels[identity] = self.label_for(item.kind)
         if keys:
             self.register(keys, gender, self.labels[identity])
+        if person and not item.identity.startswith(("~", "!")):
+            self.register_given(item.identity, self.labels[identity])
         return self.labels[identity]
 
     def collect(self, text):
@@ -291,7 +328,7 @@ class Rules:
             for bare in (False, True):
                 for index in reversed(range(len(findings))):
                     item = findings[index]
-                    if (item.kind == "OSOBA" and item.identity.startswith("~")) == bare:
+                    if (item.kind == "OSOBA" and item.identity.startswith(("~", "!"))) == bare:
                         labels[index] = self.label(item)
             pieces, position = [], 0
             for item, label in zip(findings, labels):

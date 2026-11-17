@@ -26,9 +26,9 @@ from pathlib import Path
 import pymupdf
 from lxml import etree
 
-KINDS = ("JMENO", "PRIJMENI", "RC", "NAROZENI", "ADRESA", "TELEFON", "EMAIL", "UCET", "DOKLAD", "ICO")
+KINDS = ("JMENO", "PRIJMENI", "RC", "NAROZENI", "ADRESA", "TELEFON", "EMAIL", "UCET", "DOKLAD", "ICO", "KRESTNI")
 # When two findings overlap, the earlier kind wins, so one leak is counted once.
-PRIORITY = ("EMAIL", "JMENO", "ADRESA", "RC", "UCET", "DOKLAD", "ICO", "TELEFON", "NAROZENI", "PRIJMENI")
+PRIORITY = ("EMAIL", "JMENO", "ADRESA", "RC", "UCET", "DOKLAD", "ICO", "TELEFON", "NAROZENI", "PRIJMENI", "KRESTNI")
 MAX_DEPTH = 6
 OCR_PIXELS = 40_000_000
 
@@ -162,6 +162,9 @@ def _patterns(value):
         yield rf"(?<!\w)(?:{first}{_GAP}{last}|{last}{_GAP}{first})(?!\w)"
     elif value.kind == "PRIJMENI":
         yield rf"(?<!\w){_alternatives(_forms(text, False))}(?!\w)"
+    elif value.kind == "KRESTNI":
+        # A lone given name of a known person; only a capitalised word counts (checked in ``_capitalized``).
+        yield rf"(?<!\w){_alternatives(_forms(text, True))}(?!\w)"
     elif value.kind in {"RC", "ICO"}:
         yield _number(text)
     elif value.kind == "TELEFON":
@@ -180,7 +183,8 @@ def _patterns(value):
     elif value.kind == "EMAIL":
         local = _folded(text.split("@")[0])
         yield rf"(?<![a-z0-9._%+\-]){re.escape(_folded(text))}(?![a-z0-9])"
-        if len(local) > 3 and "@" in text:
+        # A short plain local part ("info", "podatelna") is an ordinary word, so it is not searched alone.
+        if "@" in text and len(local) > 3 and (len(local) > 8 or re.search(r"[0-9._\-]", local)):
             yield rf"(?<![a-z0-9]){re.escape(local)}(?![a-z0-9])"
     elif value.kind == "ADRESA":
         street = text.split(",")[0].strip()
@@ -202,6 +206,7 @@ def _compile(values):
     for value in dict.fromkeys(values):
         for pattern in _patterns(value):
             check = (_common_ok if value.common and value.kind == "PRIJMENI" else
+                     _capitalized if value.kind == "KRESTNI" else
                      _grouped if value.kind in {"RC", "ICO", "UCET", "DOKLAD", "TELEFON"} else None)
             jobs.append((PRIORITY.index(value.kind), value.kind, re.compile(pattern, re.IGNORECASE), check))
     return jobs
@@ -210,6 +215,10 @@ def _compile(values):
 def _grouped(text, match):
     """Digits split into single-digit pieces (a list of indexes or cells) are not a number."""
     return sum(len(group) == 1 for group in re.findall(r"\d+", match.group())) <= 2
+
+
+def _capitalized(text, match):
+    return match.group()[0].isupper()
 
 
 def _common_ok(text, match):

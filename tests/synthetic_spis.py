@@ -82,7 +82,8 @@ class Person:
                 "long": f"{d}. {months[m - 1]} {y}"}[style]
 
     def values(self):
-        found = [Value("JMENO", self.name), Value("PRIJMENI", self.last, self.common), Value("NAROZENI", self.date("iso")),
+        found = [Value("JMENO", self.name), Value("PRIJMENI", self.last, self.common),
+                 Value("KRESTNI", self.first, self.first in COMMON_FIRST), Value("NAROZENI", self.date("iso")),
                  Value("RC", self.rc)]
         for kind, text in (("ADRESA", self.address if self.street else ""), ("TELEFON", self.phone),
                            ("EMAIL", self.email), ("UCET", self.account), ("DOKLAD", self.document), ("ICO", self.ico)):
@@ -91,6 +92,7 @@ class Person:
         return found
 
 
+COMMON_FIRST = {"Jan"}  # also an ordinary word elsewhere (sv. Jan); found only with a capital letter
 D = datetime.date
 PEOPLE = {
     "wolf": Person("Tadeáš", "Wolf", D(1985, 3, 14), "Dlouhá 15", "280 02 Kolín", "721 345 678",
