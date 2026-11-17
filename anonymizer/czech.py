@@ -80,17 +80,23 @@ def name_identity(first, last):
     return f"{canonical} {surname}"
 
 
+ADJECTIVE_SURNAME = re.compile(r"(.+?)(?:ý|á|ého|ému|ém|ým|é|ou)")
+FEMALE_SURNAME = re.compile(r"(.+ov)(?:á|é|ou|ými)")
+SURNAME_ENDING = re.compile(r"(?<=[bcčdďfghjklmnňprřsštťvzž])(?:ovi|em|a|u|e|i)$")
+SURNAME_MOBILE = re.compile(r"(?<=[bcčdďfghjklmnňprřsštťvzž])[eě](?=[kl]$)")
+
+
 def surname_stem(last, feminine):
-    adjective = re.fullmatch(r"(.+?)(?:ý|á|ého|ému|ém|ým|é|ou)", last)
-    female = re.fullmatch(r"(.+ov)(?:á|é|ou|ými)", last)
+    adjective = ADJECTIVE_SURNAME.fullmatch(last)
+    female = FEMALE_SURNAME.fullmatch(last)
     if female:
         last = female[1] + "á"
     elif adjective:
         last = adjective[1] + ("á" if feminine else "ý")
     elif not feminine:
         # Keep stems stable across the common mobile-e and mobile-ě patterns.
-        last = re.sub(r"(?<=[bcčdďfghjklmnňprřsštťvzž])(?:ovi|em|a|u|e|i)$", "", last)
-        last = re.sub(r"(?<=[bcčdďfghjklmnňprřsštťvzž])[eě](?=[kl]$)", "", last)
+        last = SURNAME_ENDING.sub("", last)
+        last = SURNAME_MOBILE.sub("", last)
     return last
 
 
@@ -137,18 +143,110 @@ MONTHS = "ledna února března dubna května června července srpna září ř�
 BIRTH_TEXT = re.compile(BIRTH.pattern.replace(r"(\d{1,2})\.[ \t\n]*(\d{4})", "(" + "|".join(MONTHS) + rf"){SPACE}(\d{{4}})"), re.I)
 
 
+COMMA = re.compile(r"\s*,\s*")
+POSTCODE_PREFIX = re.compile(r"^\d{3}[ \t]?\d{2}\s+")
+
+
 def address_identity(value):
-    parts = re.split(r"\s*,\s*", value.casefold())
-    parts = [re.sub(r"^\d{3}[ \t]?\d{2}\s+", "", part) for part in parts]
+    parts = COMMA.split(value.casefold())
+    parts = [POSTCODE_PREFIX.sub("", part) for part in parts]
     return ", ".join(sorted(" ".join(part.split()) for part in parts))
 
 
+# Fast scanning. The patterns below run with re.IGNORECASE, which disables the
+# regex engine's literal prefix search, so every position of a long text is
+# tried. These helpers locate the few positions where a match can start with a
+# plain anchor (a sequence of character classes, which the engine scans fast)
+# and then run the unchanged pattern there. An anchor may match more positions
+# than the pattern but never fewer, and the helpers return exactly the matches
+# of ``pattern.finditer(text)``.
+# Letters whose IGNORECASE class holds more than their two cases (see the test).
+FOLDED = {"s": "sSſ", "i": "iIİı", "k": "kK\u212a"}
+
+
+def cls(letters):
+    """Character class matching any of ``letters`` in either case."""
+    return "[" + "".join(FOLDED.get(letter, letter.lower() + letter.upper()) for letter in letters) + "]"
+
+
+def ci(word):
+    """Regex source matching ``word`` in any case, without the IGNORECASE flag."""
+    return "".join(cls(letter) if letter.lower() != letter.upper() else re.escape(letter) for letter in word)
+
+
+def anchored(pattern, start, text):
+    """Matches of ``pattern`` that can only start where ``start`` matches."""
+    position, search, match = 0, start.search, pattern.match
+    while True:
+        hit = search(text, position)
+        if hit is None:
+            return
+        found = match(text, hit.start())
+        if found:
+            yield found
+            position = found.end()
+        else:
+            position = hit.start() + 1
+
+
+def colon_lines(pattern, text):
+    """Matches of a single-line pattern that must contain a colon."""
+    find, end = text.find, len(text)
+    colon = find(":")
+    while colon != -1:
+        line_start = text.rfind("\n", 0, colon) + 1
+        line_end = find("\n", colon)
+        if line_end == -1:
+            line_end = end
+        yield from pattern.finditer(text, line_start, line_end)
+        colon = find(":", line_end)
+
+
+# nar, dat
+BIRTH_START = re.compile(cls("nd") + cls("a") + cls("rt"))
+# byt, byd, síd, trv, dor, adr
+ADDRESS_START = re.compile(cls("bsatd") + cls("yíord") + cls("tdvr"))
+# a. s., s. r. o., spol. s r. o.
+COMPANY_START = re.compile(cls("as") + rf"(?:\.|{ci('pol')}\.)")
+COMPANY_END = re.compile(
+    r"(?:a\.[ \t]*s\.|s\.[ \t]*r\.[ \t]*o\.|spol\.[ \t]*s[ \t]*r\.[ \t]*o\.)(?=[ \t]*[,;)]|[ \t]*$)",
+    re.I | re.M,
+)
+WORD_START = re.compile(r"(?<!\w)\S")
+
+
+def company_matches(text):
+    """``COMPANY.finditer(text)``, trying only starts within reach of a legal form."""
+    windows = []
+    for hit in COMPANY_START.finditer(text):
+        if COMPANY_END.match(text, hit.start()):
+            # The name is at most 101 characters before the blanks that precede the form.
+            first = hit.start()
+            while first and text[first - 1] in " \t":
+                first -= 1
+            windows.append((max(first - 101, 0), hit.start()))
+    windows.sort()
+    last = 0
+    for low, high in windows:
+        position = max(low, last)
+        while position < high:
+            word = WORD_START.search(text, position, high)
+            if word is None:
+                break
+            found = COMPANY.match(text, word.start())
+            if found:
+                yield found
+                last = position = found.end()
+            else:
+                position = word.start() + 1
+
+
 def contextual_findings(text, known_surnames=()):
-    for match in COMPANY.finditer(text):
+    for match in company_matches(text):
         yield *match.span(1), "ORGANIZACE", match[1]
-    for match in SLOVAK_FIELD.finditer(text):
+    for match in colon_lines(SLOVAK_FIELD, text):
         yield *match.span(1), "OSOBNI_UDAJ", match[1]
-    for match in FORM_FIELD.finditer(text):
+    for match in colon_lines(FORM_FIELD, text):
         kind = column_kind(match[1])
         value = match[2].rstrip(" \t.")
         if kind and plausible_value(kind, value):
@@ -158,7 +256,7 @@ def contextual_findings(text, known_surnames=()):
         if not cited_decision(text, match):
             yield *match.span(1), "SPIS", match[1]
     for pattern in (BIRTH, BIRTH_TEXT):
-        for match in pattern.finditer(text):
+        for match in anchored(pattern, BIRTH_START, text):
             day, month, year = match.groups()
             month = int(month) if month.isdecimal() else MONTHS.index(month.casefold()) + 1
             try:
@@ -166,7 +264,7 @@ def contextual_findings(text, known_surnames=()):
             except ValueError:
                 continue
             yield match.start(1), match.end(3), "NAROZENI", birth.isoformat()
-    for cue in ADDRESS_CUE.finditer(text):
+    for cue in anchored(ADDRESS_CUE, ADDRESS_START, text):
         match = ADDRESS.match(text, cue.end())
         if match:
             yield *match.span(), "ADRESA", address_identity(match[0])
@@ -203,10 +301,39 @@ def initial_identity(initials, last):
     return f"{letters} {surname}"
 
 
+INITIAL_START = re.compile(rf"[{UPPER}]\.")
+
+
+def initial_first_matches(text):
+    return anchored(INITIAL_FIRST, INITIAL_START, text)
+
+
+def initial_last_matches(text):
+    """``INITIAL_LAST.finditer(text)``: the surname is the word before blanks and initials."""
+    position = 0
+    for hit in INITIAL_START.finditer(text):
+        initials = hit.start()
+        if not initials or text[initials - 1] not in " \t":
+            continue
+        blanks = initials
+        while blanks and text[blanks - 1] in " \t":
+            blanks -= 1
+        word = blanks
+        while word and not text[word - 1].isspace():
+            word -= 1
+        for start in range(max(word, position), blanks):
+            found = INITIAL_LAST.match(text, start)
+            if found:
+                yield found
+                position = found.end()
+                break
+
+
 def initial_findings(text, known):
     """Find "J. Novák", "JUDr. K. Bílá" or "Novák J." when the context marks a person."""
-    for pattern, initials_group, surname_group in ((INITIAL_FIRST, 1, 2), (INITIAL_LAST, 2, 1)):
-        for match in pattern.finditer(text):
+    for matches, initials_group, surname_group in (
+            (initial_first_matches, 1, 2), (initial_last_matches, 2, 1)):
+        for match in matches(text):
             last = match[surname_group]
             if last.split("-")[0].casefold() in NAME_STOP or last.casefold() in GIVEN:
                 continue

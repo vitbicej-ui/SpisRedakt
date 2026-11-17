@@ -1,4 +1,6 @@
+import hashlib
 import os
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -9,7 +11,83 @@ import pymupdf as pdf
 
 from anonymizer.batch import process_batch, process_folders
 from anonymizer.documents import ocr_path, recognize_image
+from anonymizer import czech, rules as rules_module
 from anonymizer.rules import Rules
+
+
+def synthetic_file(paragraphs=1000):
+    """Deterministic synthetic text that mixes every kind of personal data with filler."""
+    names = ["Jan Novák", "Petra Svobodová", "Josef Dvořák", "Karolína Bílá", "Zdeněk Veselý",
+             "Marie Černá", "Hynek Kučera", "ZKUŠEBNÍ Pavel Horák"]
+    streets = ["Dlouhá 12", "Na Příkopě 7/3", "Školní 128", "U Lesa 5a"]
+    cities = ["Praha 1", "Brno", "Nový Bydžov", "Ústí nad Labem"]
+    forms = ["a.s.", "a. s.", "s.r.o.", "s. r. o.", "spol. s r.o.", "A.S."]
+    firms = ["Zkušební Leasing", "Alfa & Beta", "Stavby Morava", "Hutní závody"]
+    filler = ["Soud dále konstatoval, že dokazování bylo provedeno řádně a v souladu se zákonem.",
+              "Podle § 12 odst. 3 zákona č. 99/1963 Sb. je třeba postupovat dle zvláštních předpisů.",
+              "Odvolání bylo podáno včas a obsahuje všechny náležitosti.", "Částka 12 345 Kč byla uhrazena.",
+              "Na jednání dne 3. května 2021 v Praze se dostavili všichni účastníci. Zkušební Leasing ve věci rozhodl."]
+    state = 12345
+    out = []
+    for _ in range(paragraphs):
+        state = (state * 1103515245 + 12345) % 2 ** 31
+        pick = state >> 8
+        name, street, city = names[pick % 8], streets[pick // 8 % 4], cities[pick // 32 % 4]
+        firm, form = firms[pick // 128 % 4], forms[pick // 512 % 6]
+        day, month, year = pick % 28 + 1, pick % 12 + 1, 1950 + pick % 60
+        kind = pick % 14
+        if kind == 0:
+            line = f"Žalobce {name}, nar. {day}. {month}. {year}, bytem {street}, 11{pick % 10} 00 {city}, podal žalobu."
+        elif kind == 1:
+            line = f"Žalovaná společnost {firm} {form}, IČO {10000000 + pick % 8999999}, se sídlem {street}, {city}."
+        elif kind == 2:
+            line = f"Kontakt: tel. +420 777 {pick % 900 + 100} {pick % 900 + 100}, e-mail osoba{pick % 50}@example.test."
+        elif kind == 3:
+            line = (f"Ve věci sp. zn. {pick % 90 + 1} C {pick % 900 + 1}/20{pick % 20 + 10} rozhodl soud. "
+                    f"Srov. rozsudek sp. zn. 21 Cdo {pick % 9000 + 1}/2019.")
+        elif kind == 4:
+            line = f"Rodné číslo: {pick % 90 + 10}0101/{pick % 9000 + 1000}\nJméno: {name}\nTelefon: 602 {pick % 900 + 100} 222\n"
+        elif kind == 5:
+            line = f"Rozsudek převzal JUDr. K. Bílá a také {name.split()[-1]} J. dne {day}. {month}. {year}."
+        elif kind == 6:
+            line = (f"Platba na účet {pick % 900 + 100}-1234567890/0100 proběhla; IBAN CZ65 0800 0000 1920 0014 5399, "
+                    f"doklad: OP: AB{pick % 900000 + 100000}, DIČ CZ{10000000 + pick % 8999999}, "
+                    f"rodné číslo {pick % 90 + 10}0101/{pick % 9000 + 1000} uvedeno.")
+        elif kind == 7:
+            line = f"meno: {name}  dátum narodenia: {day}. {month}. {year}\n"
+        elif kind == 8:
+            line = f"Svědek {name} uvedl, že {firm}\t{form},\nsídlem {street}, {city}, neplnila povinnosti."
+        else:
+            line = filler[pick % 5]
+        out.append(line)
+    return "\n".join(out) + "\n"
+
+
+def token_strings(count):
+    """Deterministic strings of fragments that probe the boundaries of every pattern."""
+    tokens = ["a.", "s.", "r.", "o.", "a. s.", "s. r. o.", "spol. s r. o.", "spol.", "A.S.", "S.R.O.", "ſ. r. o.",
+              ",", " ", "  ", "\t", "\n", "\r\n", ";", ")", "(", "A", "Firma", "Alfa-Beta", "x", "@", "+", ".", "-",
+              "_", "1", "7", "123456", "123 456", "/", "12/", "J.", "K.", "J. K.", "Novák", "NOVÁK", "Nov-ák", "ſ",
+              "\u212a", "\u0130", "\u0131", "é", ":", ": ", "IČO", "ič", "CZ", "cz", "CZ1234567890", "nar", "NAR.",
+              "dat", "DAT.", "datum narození", "bytem", "Bydlí", "sídlem", "trvalé bytem", "adresa", "účet", "účtu",
+              "č. ú.", "č.", "ú.", "bankovní spojení", "ban", "tel", "doklad", "OP", "pas", "AB123456", "dne",
+              "1. 2. 1980", "1. ledna 1980", "12345678", "+420", "777", "800101/1234", "a@b.cz", "x@y",
+              "user.name+tag@sub.example.cz", "Jméno", "Telefon", "Rodné číslo", "meno", "priezvisko", "\u00a0",
+              "\u2028", "Ⅰ", "Ⓐ", "JUDr.", "ZKUŠEBNÍ LEASING", "CZ12 3456 7890 1234 5678 9012"]
+    state = 987654321
+    for _ in range(count):
+        state = (state * 1103515245 + 12345) % 2 ** 31
+        length = state % 40 + 1
+        parts = []
+        for _ in range(length):
+            state = (state * 1103515245 + 12345) % 2 ** 31
+            parts.append(tokens[(state >> 8) % len(tokens)])
+        if state % 7 == 0:
+            # Company names around the 100 character reach of the pattern.
+            state = (state * 1103515245 + 12345) % 2 ** 31
+            body = "x" * (85 + state % 30)
+            parts.append(f"\n{body}{' ' * ((state >> 8) % 5)} a. s.{',' if state % 2 else ''}")
+        yield "".join(parts)
 
 
 class ProcessingTests(unittest.TestCase):
@@ -1121,6 +1199,57 @@ class ProcessingTests(unittest.TestCase):
         for path, expected in ((docx, ".docx"), (archive, ".zip")):
             self.assertEqual(identify(path, ".bin"), expected)
             self.assertEqual(identify(path.read_bytes(), ".bin"), expected)
+
+    def test_replace_output_is_stable(self):
+        # The hashes come from the implementation before the scanning was sped up.
+        text = synthetic_file()
+        self.assertEqual(len(text), 81225)
+        replaced, count = Rules().replace(text)
+        self.assertEqual(count, 2193)
+        self.assertEqual(hashlib.sha256(replaced.encode()).hexdigest(),
+                         "00a60cf0ead5d8303899091355997d9e3804a01bf701e1105692bf011b4d0c92")
+        # Paragraph by paragraph with one shared Rules, as the Office formats do.
+        shared = Rules()
+        pieces = [shared.replace(line)[0] for line in text.split("\n")]
+        self.assertEqual(hashlib.sha256("\n".join(pieces).encode()).hexdigest(),
+                         "1635a96fcd269c2082dfbb865f07a6584616a5e3ee4f39e6541f552c28a78846")
+        for kind in ("OSOBA", "ADRESA", "ORGANIZACE", "TELEFON", "EMAIL", "ICO", "SPIS", "RC", "UCET", "IBAN",
+                     "DIC", "DOKLAD", "NAROZENI", "OSOBNI_UDAJ"):
+            self.assertRegex(replaced, rf"\[{kind}-\d+\]")
+        self.assertIn("Jméno: [OSOBA-1]", replaced)
+        self.assertIn("21 Cdo", replaced)
+
+    def test_fast_scanning_finds_what_the_patterns_find(self):
+        plain = {
+            "ORGANIZACE": (czech.company_matches, czech.COMPANY),
+            "SLOVAK": (lambda text: czech.colon_lines(czech.SLOVAK_FIELD, text), czech.SLOVAK_FIELD),
+            "FORM": (lambda text: czech.colon_lines(czech.FORM_FIELD, text), czech.FORM_FIELD),
+            "BIRTH": (lambda text: czech.anchored(czech.BIRTH, czech.BIRTH_START, text), czech.BIRTH),
+            "BIRTH_TEXT": (lambda text: czech.anchored(czech.BIRTH_TEXT, czech.BIRTH_START, text), czech.BIRTH_TEXT),
+            "ADDRESS": (lambda text: czech.anchored(czech.ADDRESS_CUE, czech.ADDRESS_START, text), czech.ADDRESS_CUE),
+            "INITIAL_FIRST": (czech.initial_first_matches, czech.INITIAL_FIRST),
+            "INITIAL_LAST": (czech.initial_last_matches, czech.INITIAL_LAST),
+        }
+        for kind, scan in rules_module.SCANNERS.items():
+            plain[kind] = (scan, rules_module.COMPILED[kind])
+        found = dict.fromkeys(plain, 0)
+        for text in token_strings(4000):
+            for kind, (scan, pattern) in plain.items():
+                expected = [match.regs for match in pattern.finditer(text)]
+                self.assertEqual([match.regs for match in scan(text)], expected, (kind, text))
+                found[kind] += len(expected)
+        # Every scanner was exercised on real matches.
+        self.assertTrue(all(found.values()), found)
+
+    def test_anchor_letters_cover_ignorecase(self):
+        # The anchors spell out both cases of a letter; IGNORECASE may add more (ſ, İ, ı).
+        every = "".join(map(chr, range(0x110000)))
+        for letter in "abcdefghijklmnopqrstuvwxyzáčďéěíňóřšťúůýž":
+            expected = set(re.compile(re.escape(letter), re.IGNORECASE).findall(every))
+            self.assertEqual(set(re.compile(czech.cls(letter)).findall(every)), expected, letter)
+        for source in (r"[\w.+-]", r"[\w-]", r"\d", r"\w"):
+            self.assertEqual(set(re.compile(source, re.IGNORECASE).findall(every)),
+                             set(re.compile(source).findall(every)), source)
 
 
 class AdviceTests(unittest.TestCase):
