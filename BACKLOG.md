@@ -4,7 +4,7 @@ Pořadí je priorita. Orchestrátor bere úkoly shora, stav zapisuje sem: `[ ]` 
 
 ## Robustnost u skutečných spisů
 
-- [ ] **Důvod chyby v GUI.** U odmítnutého souboru zobrazit srozumitelnou radu podle kódu z `anonymizer/reasons.py` (např. „Odstraňte makra a uložte znovu jako DOCX“).
+- [x] **Důvod chyby v GUI.** (8e048ac) U odmítnutého souboru zobrazit srozumitelnou radu podle kódu z `anonymizer/reasons.py` (např. „Odstraňte makra a uložte znovu jako DOCX“).
 - [ ] **Paměť u velkých vstupů.** `batch.py` čte celý soubor do paměti (až 500 MB). Rozpoznat formát z hlavičky nebo cesty a soubor kopírovat po blocích.
 - [ ] **Výkon pravidel.** `Rules.find` zpracuje asi 1 MB textu za sekundu. Profilovat `contextual_findings` a zrychlit bez změny výsledků.
 - [ ] **Přesné tabulky v DOC.** `legacy.py` skládá tabulky heuristicky. Použít vlastnosti odstavců (PlcBtePapx, sprmPFInTable), aby se víceodstavcové buňky nerozpadaly.
