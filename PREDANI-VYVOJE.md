@@ -105,3 +105,16 @@ Kontrolu výstupů v LibreOffice (`outputs.yml`) a vydání podle štítku (`rel
 - U nejistých formátových detailů (binární formáty, Prm, RTF) volit konzervativní variantu: návrat ke staré cestě, sjednocení plánů nebo nevydání souboru.
 - Hlídat, aby nové kroky neobcházely pravidla: každý text, který jde do výstupu, musí projít `Rules` a závěrečnou kontrolou výstupu.
 - Před zahájením položek, které mění GUI (náhled, ruční vyznačení), nechat člověka odsouhlasit návrh rozhraní.
+
+## 9. Běh 17. 11. 2026 večer: produkční cíl „spis do cloudového modelu“
+
+Pořadí podle sekce „Produkce“ v BACKLOG.md. Commity:
+
+| Commit | Obsah |
+|---|---|
+| `16f935c` | `anonymizer/extract.py`: extrakce textu ze všech formátů (proudově z ZIPu), `Document`/`Skipped` bez názvů souborů, text mimo `repr`. |
+| `d34ded5` | Samotná příjmení: rodiny příjmení (pád, rod, diakritika), `pan/paní` a role + jedno slovo, `COMMON_SURNAMES`, výjimky pro soudy/obce, `Rules.collect`, `Rules.surfaces`. |
+| `473dd51` | `tests/synthetic_spis.py` (15 položek, 96 hodnot), `anonymizer/leaks.py` (nezávislý detektor), `scripts/leak_report.py`. |
+| `278f156` | `anonymizer/markdown.py`: dvoufázové štítkování, krátké štítky, legenda, obsah, deterministické úspory. |
+
+Ověřeno orchestrátorem mimo testy vývojářů: ruční příklady příjmení (pády, rody, verzálky, bez diakritiky, „Malý rozdíl“, soud v Kolíně); detekce záhlaví ztrácela větu s číslem strany – vráceno a opraveno.

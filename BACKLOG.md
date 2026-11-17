@@ -6,11 +6,11 @@ Pořadí je priorita. Orchestrátor bere úkoly shora, stav zapisuje sem: `[ ]` 
 
 Cíl běhu 17. 11. 2026 (termín 18. 11.): jeden ZIP se spisem → `spis_anonymizovano.md` pro jazykové modely v cloudu. Tato sekce má přednost před ostatními. Náhled v GUI, ruční vyznačení ploch, jednotné pseudonymy mezi dávkami a převod přes Office jsou do té doby odloženy.
 
-- [~] **0. Syntetický spis a detektor úniků.** Generátor syntetického ZIPu se všemi formáty a soudními šablonami, nezávislý detektor úniků (všechny vrstvy výstupu, varianty bez diakritiky, verzálkami, s mezerami, v pádech), vypisuje jen počty podle druhu.
-- [~] **1. Samotná příjmení v celém spisu.** Dvoufázové zpracování ZIPu i dávky, příjmení ve všech pádech a obou rodech, „pan/paní + slovo s velkým písmenem“ jako osoba.
-- [~] **2. Úsporný Markdown spisu.** `spis_anonymizovano.md`: extrakce všech textů, čištění OCR, dvoufázová anonymizace, deterministické úspory (záhlaví/zápatí, duplicity, opakované odstavce, citované e-maily, krátké štítky), legenda, obsah s odhadem tokenů, kontrola před vydáním. Volby v GUI „Vytvořit také anonymizovaný ZIP pro kontrolu“ a „Rozdělit po dokumentech“ (výchozí vypnuto).
-- [ ] **3. Víceřádkové nadpisy sloupců.** Viz položka v sekci Robustnost; nově i XLSX a Markdown.
-- [ ] **4. Vydání spisu bez odmítnutých položek.** Markdown a kontrolní ZIP bez odmítnutých položek, seznam nezpracovaných položek (pořadí + kód), `NEZPRACOVANO.txt`, hlášení v GUI a auditu, README.
+- [x] **0. Syntetický spis a detektor úniků.** (473dd51; počáteční úniky v kontrolních kopiích: JMENO 1, TELEFON 2, EMAIL 2, UCET 1 – účet zalomený na další řádek, jméno rozdělené spojovníkem a e-mail ve skenu, `@` čtený OCR jako `©`, telefon v PDF po OCR; opravuje se) Generátor syntetického ZIPu se všemi formáty a soudními šablonami, nezávislý detektor úniků (všechny vrstvy výstupu, varianty bez diakritiky, verzálkami, s mezerami, v pádech), vypisuje jen počty podle druhu.
+- [~] **1. Samotná příjmení v celém spisu.** (pravidla d34ded5; napojení dávky rozpracováno) Dvoufázové zpracování ZIPu i dávky, příjmení ve všech pádech a obou rodech, „pan/paní + slovo s velkým písmenem“ jako osoba.
+- [~] **2. Úsporný Markdown spisu.** (extrakce 16f935c, vykreslení 278f156; dávka a GUI rozpracováno) `spis_anonymizovano.md`: extrakce všech textů, čištění OCR, dvoufázová anonymizace, deterministické úspory (záhlaví/zápatí, duplicity, opakované odstavce, citované e-maily, krátké štítky), legenda, obsah s odhadem tokenů, kontrola před vydáním. Volby v GUI „Vytvořit také anonymizovaný ZIP pro kontrolu“ a „Rozdělit po dokumentech“ (výchozí vypnuto).
+- [~] **3. Víceřádkové nadpisy sloupců.** Viz položka v sekci Robustnost; nově i XLSX a Markdown.
+- [~] **4. Vydání spisu bez odmítnutých položek.** Markdown a kontrolní ZIP bez odmítnutých položek, seznam nezpracovaných položek (pořadí + kód), `NEZPRACOVANO.txt`, hlášení v GUI a auditu, README.
 - [ ] **5. Bezpečné výchozí chování.** Kontrolní ZIP bez metadat a původních názvů, skryté listy/řádky/sloupce XLSX, obrázky bez textu začerněné celé, v Markdownu vynechané.
 - [ ] **6. Výkon na velkém spisu.** ZIP ~200 MB / ~300 stran skenů, proudové čtení položek, průběh v GUI, změřený čas.
 - [ ] **7. README a GUI.** Sekce „Výstup pro jazykové modely v cloudu“, souhrn po dokončení, nové rady v `ADVICE`.
