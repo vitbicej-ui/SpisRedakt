@@ -1055,5 +1055,66 @@ class ProcessingTests(unittest.TestCase):
                          {"released": 1, "failed": 1, "skipped": 1})
 
 
+class AdviceTests(unittest.TestCase):
+    def test_every_reason_has_advice(self):
+        from anonymizer.reasons import ADVICE, REASONS
+        for _, code in REASONS:
+            self.assertIn(code, ADVICE)
+        for code, text in ADVICE.items():
+            self.assertIsInstance(text, str)
+            self.assertTrue(text.strip(), code)
+
+    def test_every_format_error_has_specific_advice(self):
+        import re
+        from anonymizer.reasons import ADVICE, advice
+        package = Path(__file__).resolve().parent.parent / "anonymizer"
+        raised = set()
+        for module in package.glob("*.py"):
+            raised.update(re.findall(r'FormatError\("(\w+)", "([^"]+)"\)', module.read_text(encoding="utf-8")))
+        self.assertGreater(len(raised), 10)
+        for code, message in raised:
+            self.assertEqual(advice(message), ADVICE[code], code)
+
+    def test_advice_for_messages(self):
+        from anonymizer.reasons import ADVICE, GENERAL_ADVICE, PERMISSION_ADVICE, advice
+        self.assertEqual(advice("Soubor načítá externí data."), ADVICE["office_external_link"])
+        self.assertEqual(advice("Vstup překračuje limit velikosti."), ADVICE["size_limit"])
+        self.assertEqual(advice("Obsah neodpovídá deklarovanému formátu."), ADVICE["invalid_signature"])
+        self.assertEqual(advice("Výstup Office nelze přečíst."), ADVICE["corrupt_output"])
+        self.assertEqual(advice("PermissionError"), PERMISSION_ADVICE)
+        self.assertEqual(advice("Něco neznámého"), GENERAL_ADVICE)
+
+    def test_gui_worker_emits_advice(self):
+        from PySide6.QtWidgets import QApplication
+        from anonymizer.gui import BatchWorker
+        app = QApplication.instance() or QApplication([])
+        self.assertIsNotNone(app)
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            source, output, audit = root / "in", root / "out", root / "audit"
+            source.mkdir()
+            output.mkdir()
+            (source / "broken.docx").write_bytes(b"invalid")
+            (source / "ok.txt").write_text("Běžný text bez údajů.", encoding="utf-8")
+            selected = set(source.iterdir())
+            worker = BatchWorker(source, output, None, None, selected)
+            lines = []
+            worker.result.connect(lines.append)
+            previous = os.environ.get("SPISREDAKT_AUDIT_DIR")
+            os.environ["SPISREDAKT_AUDIT_DIR"] = str(audit)
+            try:
+                worker.run()
+            finally:
+                if previous is None:
+                    del os.environ["SPISREDAKT_AUDIT_DIR"]
+                else:
+                    os.environ["SPISREDAKT_AUDIT_DIR"] = previous
+        index = next(i for i, line in enumerate(lines) if "Chyba:" in line)
+        self.assertTrue(lines[index + 1].startswith("    Rada: "), lines)
+        for line in lines:
+            if line.startswith("    Rada: "):
+                self.assertNotIn("broken", line)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -30,6 +30,8 @@ Pokud aplikace rozpozná slovenský výpis z rejstříku trestů nebo osobní fo
 
 Po každé dávce aplikace zobrazí cestu k vlastní složce s průběžným protokolem `events.jsonl` a závěrečným `souhrn.txt`. Výchozí složka `audit` leží vedle aplikace. Chcete-li audity zpřístupnit Codexu i při spuštění aplikace z jiné složky, nastavte před spuštěním proměnnou `SPISREDAKT_AUDIT_DIR` na místní zapisovatelnou složku v pracovním prostoru. Při chybě při založení auditu aplikace zkusí místní dočasnou složku. Protokol obsahuje pořadová čísla, formáty, kódy výsledků a u odmítnutých souborů i kód důvodu (například `office_external_link` nebo `pdf_page_too_large`), bez obsahu, názvů a cest zpracovaných dokumentů. Souhrn uvádí počty podle důvodů. Audit tak lze poslat k diagnostice. Opakovaná dávka přidá k existujícímu výstupu příponu `_2`, `_3` atd.
 
+U odmítnutého souboru aplikace pod chybové hlášení vypíše řádek „Rada“ s pevným textem, co s dokumentem udělat (například odstranit propojení, makra nebo heslo, případně dokument anonymizovat ručně). Rada vychází jen z kódu důvodu, neobsahuje obsah, název ani cestu dokumentu a nezaručuje, že soubor po úpravě projde.
+
 ## Rozsah zpracování
 
 - Limit velikosti je 500 MB pro ZIP, 400 MB pro PDF, TIFF, dokumenty Office, OpenDocument, RTF a e-maily a 40 MB pro textové formáty a samostatné obrázky. ZIP může obsahovat všechny podporované formáty včetně vnořených archivů do hloubky 3. Rozbalený obsah smí mít nejvýše 2 GB a 5 000 položek. Položky se zpracují postupně a ve výstupním archivu dostanou názvy `polozka-0001.pdf` atd. Jediná nepodporovaná nebo odmítnutá položka zastaví vydání celého archivu.

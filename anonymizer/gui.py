@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 from .batch import process_folders
+from .reasons import advice
 
 
 class BatchWorker(QThread):
@@ -34,6 +35,8 @@ class BatchWorker(QThread):
                 source_root, output_root, _ = self.arguments
                 message = str(target.relative_to(Path(output_root).resolve())) if target else f"Chyba: {error}"
                 self.result.emit(f"{source.relative_to(Path(source_root).resolve())} → {message}")
+                if not target:
+                    self.result.emit(f"    Rada: {advice(error)}")
                 remaining.discard(source)
                 self.handled.emit(str(source))
             for source in sorted(remaining):
