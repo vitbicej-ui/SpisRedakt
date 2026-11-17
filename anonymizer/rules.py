@@ -14,6 +14,13 @@ RULES = {
     "EMAIL": r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+",
     "IBAN": r"(?<!\w)CZ(?:[ \t]?\d){22}(?![ \t]?\d)",
     "RC": r"(?<!\d)\d{6}[ \t]*/[ \t]*\d{3,4}(?!\d)",
+    # Birth number without a slash ("850314-1237", "850314 1237", "8503141237"). Only a valid number counts (see
+    # ``valid_rc``); not a part of a longer number, an account ("…/0800", "19-2000123456"), a decimal or a group.
+    "RC_BARE": (r"(?<![\w+/.-])(?:\d{6}(?:[ \t]*-[ \t]*|[ \t]+)\d{3,4}|\d{9,10})"
+                r"(?!\d|[ \t]*/|[.,]\d|-\d|[ \t]\d{3})"),
+    # A cue ("rodné číslo", "r. č.", "RČ") also takes a number that fails the checksum.
+    "RC_CTX": (r"(?<!\w)(?:rodn[ée][ \t]+[cč][ií]slo|r\.[ \t]*č\.|rč)[ \t]*:?[ \t]*"
+               r"(\d{6}[ \t]*[-/ ]?[ \t]*\d{3,4})(?![\d/]|-\d)"),
     # A number may be broken by a line end, or written with hyphens or dots ("777-123-456", "777.123.456").
     "TELEFON": (r"(?<![\w+])(?:\(?(?:\+|00)420\)?[ \t]*)?(?:"
                 r"[67]\d{2}(?:[ \t]?\n?[ \t]?\d{3}){2}|[2-5]\d{2}(?:[ \t]\n?[ \t]?\d{3}){2}|"
@@ -29,7 +36,8 @@ WHITESPACE = re.compile(r"\s")
 LETTER_INITIAL = re.compile(r"\w\.")
 INITIALS = re.compile(r"((?:\w\. ?)+) (\S+)")
 EMAIL_RUN = re.compile(r"[\w.+-]+\Z")
-STRIPPED = {"IBAN", "RC", "TELEFON", "UCET", "NAROZENI"}
+STRIPPED = {"IBAN", "RC", "RC_BARE", "RC_CTX", "TELEFON", "UCET", "NAROZENI"}
+KIND_OF = {"RC_BARE": "RC", "RC_CTX": "RC"}
 NON_DIGIT = re.compile(r"\D")
 # OCR often reads "@" as "©" or "®" (and may add a stray letter after it); "(at)" is a common spelling.
 AT_LOOKALIKE = re.compile(r"(?<=[\w.+-])(?:[©®]|\((?:at|AT)\)|\[(?:at|AT)\])[ĎďĚě ]?(?=[\w-])")
@@ -78,6 +86,22 @@ def email_matches(text):
             at = find("@", at + 1)
 
 
+VALID_MONTHS = {*range(1, 13), *range(21, 33), *range(51, 63), *range(71, 83)}
+
+
+def valid_rc(digits):
+    """Whether nine or ten digits form a birth number (date part, year before 1954 for nine digits, checksum)."""
+    if len(digits) not in (9, 10) or not digits.isdigit():
+        return False
+    month, day = int(digits[2:4]), int(digits[4:6])
+    if month not in VALID_MONTHS or not 1 <= day <= 31:
+        return False
+    if len(digits) == 9:
+        return int(digits[:2]) <= 53
+    rest = int(digits[:9]) % 11
+    return int(digits[9]) == (0 if rest == 10 else rest)
+
+
 def rc_matches(text):
     """``COMPILED["RC"].finditer(text)``: six digits, blanks, then the slash."""
     pattern, find, position = COMPILED["RC"], text.find, 0
@@ -97,6 +121,7 @@ def rc_matches(text):
         slash = find("/", slash + 1)
 
 
+RC_CTX_START = re.compile(cls("r"))
 CZ_START = re.compile(cls("c") + cls("z"))
 PHONE_START = re.compile(r"\(?(?:\+|00)4|[2-7]\d")
 # úč, ban, č.
@@ -108,11 +133,13 @@ SCANNERS = {
     "EMAIL": email_matches,
     "IBAN": lambda text: anchored(COMPILED["IBAN"], CZ_START, text),
     "RC": rc_matches,
+    "RC_CTX": lambda text: anchored(COMPILED["RC_CTX"], RC_CTX_START, text),
     "TELEFON": lambda text: anchored(COMPILED["TELEFON"], PHONE_START, text),
     "UCET": lambda text: anchored(COMPILED["UCET"], ACCOUNT_START, text),
     "DIC": lambda text: anchored(COMPILED["DIC"], CZ_START, text),
     "DOKLAD": lambda text: anchored(COMPILED["DOKLAD"], DOKLAD_START, text),
     "ICO": lambda text: anchored(COMPILED["ICO"], ICO_START, text),
+    "RC_BARE": lambda text: COMPILED["RC_BARE"].finditer(text),
 }
 
 
@@ -163,13 +190,17 @@ class Rules:
             for match in scan(text):
                 group = 1 if match.lastindex else 0
                 identity = key(match[group])
+                if kind == "RC_BARE" and not valid_rc(NON_DIGIT.sub("", identity)):
+                    continue
                 if kind in STRIPPED:
                     identity = WHITESPACE.sub("", identity)
+                if kind in KIND_OF or kind == "RC":
+                    identity = NON_DIGIT.sub("", identity)
                 if kind == "TELEFON":
                     identity = NON_DIGIT.sub("", identity)
                     if len(identity) > 9:
                         identity = identity.removeprefix("00").removeprefix("420")
-                candidates.append((*match.span(group), kind, identity))
+                candidates.append((*match.span(group), KIND_OF.get(kind, kind), identity))
         for start, end, shown in lookalike_emails(text):
             candidates.append((start, end, "EMAIL", key(shown)))
         candidates.sort(key=lambda item: (item[0], item[0] - item[1]))

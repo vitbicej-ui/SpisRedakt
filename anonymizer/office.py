@@ -27,6 +27,10 @@ DROPPED_EXTERNAL = ("/attachedTemplate", "/mailMergeSource", "/mailMergeHeaderSo
 RELATIONSHIP_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
 CLEARED_ATTRIBUTES = {"author", "initials", "userName", "lastModifiedBy", "descr", "tooltip", "userId",
                       "providerId", "title"}
+# Numeric identifiers the application generates; they carry no text of the author and may look like a phone number.
+TECHNICAL_ATTRIBUTES = {"id", "spid", "paraId", "textId", "idx", "creationId", "rsid", "rsidR", "rsidRPr", "rsidRDefault",
+                        "rsidP", "rsidTr", "rsidSect", "rsidDel", "rsidRoot"}
+TECHNICAL_ELEMENTS = {"creationId", "rsid", "rsidRoot"}
 MEDIA = re.compile(r"^(?:word|xl|ppt)/media/[^/]+\.(png|jpe?g|bmp)$", re.I)
 DISABLED_LINK = "https://example.invalid/"
 
@@ -620,7 +624,11 @@ def redact_part(name, root, suffix, rules, columns, dropped, hidden=frozenset())
             raise ValueError("Citlivý údaj zůstal v části Office, kterou nelze bezpečně upravit.")
         if not isinstance(node.tag, str):
             continue
-        for value in node.attrib.values():
+        local = etree.QName(node).localname
+        for attr, value in node.attrib.items():
+            name = etree.QName(attr).localname
+            if name in TECHNICAL_ATTRIBUTES or (name == "val" and local in TECHNICAL_ELEMENTS):
+                continue
             if rules.find(value):
                 raise ValueError("Citlivý údaj v názvu nebo popisku vyžaduje ruční úpravu.")
 

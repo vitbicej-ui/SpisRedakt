@@ -795,7 +795,7 @@ def structured_identity(kind, value):
         if len(words) == 2 and all(re.fullmatch(rf"{NAME_WORD}(?:-{NAME_WORD})*", word) for word in words):
             return name_identity(*words)
     if kind in {"RC", "TELEFON", "UCET", "ICO", "DIC", "IBAN"}:
-        text = re.sub(r"\s", "", text)
+        text = re.sub(r"[^\d]" if kind == "RC" else r"\s", "", text)
         if kind == "TELEFON":
             text = text.removeprefix("+420")
     return text.casefold()

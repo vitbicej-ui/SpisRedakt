@@ -75,6 +75,12 @@ class Person:
                 return number[:6] + "/" + number[6:]
             serial += 1
 
+    def rc_as(self, style):
+        """The birth number as written in a document: with a slash, a hyphen, a blank or without a separator."""
+        digits = self.rc.replace("/", "")
+        return {"slash": self.rc, "hyphen": digits[:6] + "-" + digits[6:], "blank": digits[:6] + " " + digits[6:],
+                "bare": digits}[style]
+
     def date(self, style="short"):
         d, m, y = self.born.day, self.born.month, self.born.year
         months = ("ledna února března dubna května června července srpna září října listopadu prosince").split()
@@ -352,7 +358,7 @@ def build_spis(target_zip, scan_pages=2):
          f"podle Wolfa nemluvil pravdu, soud však uvěřil svědku Benešovi a slyšel i Pospíšila."),
         NOTICE,
         (f"V Kolíně dne 17. 6. 2026\n{JUDGE}\n\n{CERTIFIED}\nKontakt na kancelář: {pospisil.phone}, "
-         f"{wolf.email}. Rodné číslo žalovaného {wolf.rc}.")]
+         f"{wolf.email}. Rodné číslo žalovaného {wolf.rc_as('hyphen')}.")]
     files["02_protokoly/04_rozsudek_12C345-2026.pdf"] = text_pdf(pages)
 
     # 5. ODT: third decision with the same notice, married couple, the common-word surname.
@@ -369,7 +375,7 @@ def build_spis(target_zip, scan_pages=2):
     files["02_protokoly/06_protokol_o_jednani.rtf"] = rtf([
         "PROTOKOL O JEDNÁNÍ", HEADER,
         f"Svědek {benes.name}, nar. {benes.date()}, bytem {benes.address}, tel. {benes.phone}, {benes.email}, "
-        f"rodné číslo {benes.rc}, OP č.: {benes.document}.",
+        f"rodné číslo {benes.rc_as('bare')}, OP č.: {benes.document}.",
         f"Dále vypovídala paní {kucerova.name}, nar. {kucerova.date('padded')}, bytem {kucerova.address}, "
         f"telefon +420 {kucerova.phone}, e-mail {kucerova.email}.",
         f"Pospíšil J. a J. Novák předali soudu listiny. S Novákovou se soud nespojil. Účet {benes.account}.",
