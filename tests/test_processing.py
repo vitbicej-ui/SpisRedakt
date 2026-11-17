@@ -1,4 +1,5 @@
 import hashlib
+import io
 import os
 import re
 from pathlib import Path
@@ -713,6 +714,132 @@ class ProcessingTests(unittest.TestCase):
                                      entry.get("start", 0xFFFFFFFE), entry.get("size", 0))
         directory = directory.ljust(directory_sectors * sector, b"\0")
         return header + b"".join(struct.pack("<I", value) for value in fat) + directory + b"".join(chunks)
+
+    def word_file(self, main, header="", paragraphs=None, bad_page=False):
+        """Build a minimal DOC. ``paragraphs`` lists (in_table, ttp, itap) for the leading
+        paragraphs (ending with \\r or \\x07); None leaves out PlcBtePapx."""
+        import struct
+
+        text = main + header
+        ends = [index + 1 for index, char in enumerate(text) if char in "\r\x07"]
+        starts = [0] + ends[:-1]
+        ranges = list(zip(starts, ends))
+        flags = list(paragraphs or []) + [(0, 0, 0)] * (len(ranges) - len(paragraphs or []))
+        runs = []
+        for (first, last), (in_table, ttp, itap) in zip(ranges, flags):
+            grpprl = b""
+            if in_table:
+                grpprl += struct.pack("<HB", 0x2416, 1)
+            if ttp:
+                grpprl += struct.pack("<HB", 0x2417, 1)
+            if itap:
+                grpprl += struct.pack("<Hi", 0x6649, itap)
+            runs.append((first, last, grpprl))
+        chunks = [runs[index:index + 6] for index in range(0, len(runs), 6)]
+        base = 1024 + 512 * len(chunks)
+        pages = []
+        for chunk in chunks:
+            page = bytearray(512)
+            edges = [base + 2 * chunk[0][0]] + [base + 2 * last for _, last, _ in chunk]
+            struct.pack_into(f"<{len(edges)}I", page, 0, *edges)
+            top = 511
+            for number, (_, _, grpprl) in enumerate(chunk):
+                content = b"\0\0" + grpprl
+                if len(content) % 2 == 0:
+                    content += b"\0"
+                top -= len(content) + 1
+                top -= top % 2
+                page[top] = (len(content) + 1) // 2
+                page[top + 1:top + 1 + len(content)] = content
+                page[4 * (len(chunk) + 1) + 13 * number] = top // 2
+            page[511] = len(chunk)
+            pages.append(bytes(page))
+        word = bytearray(1024)
+        struct.pack_into("<HHH", word, 0, 0xA5EC, 0xC1, 0)
+        struct.pack_into("<H", word, 0x0A, 0x0200)
+        struct.pack_into("<H", word, 32, 14)
+        struct.pack_into("<H", word, 62, 22)
+        struct.pack_into("<ii", word, 64 + 12, len(main), 0)
+        struct.pack_into("<i", word, 64 + 20, len(header))
+        struct.pack_into("<H", word, 152, 93)
+        plc = struct.pack("<II", 0, len(text)) + struct.pack("<HIH", 0, base, 0)
+        clx = b"\x02" + struct.pack("<I", len(plc)) + plc
+        struct.pack_into("<II", word, 154 + 33 * 8, 0, len(clx))
+        table = clx
+        if paragraphs is not None:
+            numbers = [2 + index + (100 if bad_page else 0) for index in range(len(chunks))]
+            edges = [base + 2 * chunk[0][0] for chunk in chunks] + [base + 2 * len(text)]
+            papx = struct.pack(f"<{len(edges)}I", *edges) + struct.pack(f"<{len(numbers)}I", *numbers)
+            struct.pack_into("<II", word, 154 + 13 * 8, len(clx), len(papx))
+            table += papx
+        for page in pages:
+            word += page
+        word += text.encode("utf-16-le")
+        return self.compound_file({"WordDocument": bytes(word), "1Table": table})
+
+    def doc_structure(self, doc):
+        """Convert DOC to DOCX and check that no visible character was lost or duplicated."""
+        from collections import Counter
+        from docx.oxml.ns import qn
+        from anonymizer.legacy import clean, doc_text, doc_to_docx
+
+        result = Document(io.BytesIO(doc_to_docx(doc)))
+        shown = "".join(node.text or "" for node in result.element.body.iter(qn("w:t")))
+        given = clean(doc_text(doc)[0])
+
+        def count(value):
+            return Counter(char for char in value if not char.isspace() and char != "\x07")
+
+        self.assertEqual(count(given), count(shown))
+        return result
+
+    def test_legacy_word_tables_by_paragraph_properties(self):
+        from anonymizer.formats import redact_file
+        from anonymizer.legacy import doc_to_docx
+
+        T, ROW = (1, 0, 1), (1, 1, 1)
+        grid = "Jméno\ra příjmení\x07Telefon\x07\x07Karolína\rBílá\x07777 123 456\x07\x07"
+        props = [T, T, T, ROW, T, T, T, ROW]
+        doc = self.word_file(grid, "", props)
+        result = self.doc_structure(doc)
+        self.assertEqual(len(result.tables), 1)
+        self.assertEqual([[cell.text for cell in row.cells] for row in result.tables[0].rows],
+                         [["Jméno\na příjmení", "Telefon"], ["Karolína\nBílá", "777 123 456"]])
+        source, target = self.root / "tabulka.doc", self.root / "tabulka_out.docx"
+        source.write_bytes(doc)
+        redact_file(source, target, ".doc", Rules(), None)
+        cells = [[cell.text for cell in row.cells] for row in Document(target).tables[0].rows]
+        self.assertEqual(cells[1][1], "[TELEFON-1]")
+        # A two-line heading ("Jméno" / "a příjmení") is not recognized as a name column,
+        # so only the structure is checked for the name cell.
+        self.assertEqual(cells[1][0], "Karolína\nBílá")
+
+        # Text around the table stays in paragraphs and the table does not end early.
+        doc = self.word_file("Před\r" + grid + "Za\r", "", [(0, 0, 0)] + props)
+        result = self.doc_structure(doc)
+        self.assertEqual([paragraph.text for paragraph in result.paragraphs if paragraph.text], ["Před", "Za"])
+        self.assertEqual(len(result.tables), 1)
+        self.assertEqual(len(result.tables[0].rows), 2)
+
+        # A nested table is flattened into the cell of the outer table.
+        main = "Úvod\rX\rVnitřní1\x07Vnitřní2\x07\x07\x07Druhá\x07\x07Konec\r"
+        props = [(0, 0, 0), T, (1, 0, 2), (1, 0, 2), (1, 1, 2), T, T, ROW]
+        result = self.doc_structure(self.word_file(main, "", props))
+        self.assertEqual([[cell.text for cell in row.cells] for row in result.tables[0].rows],
+                         [["X\nVnitřní1\nVnitřní2", "Druhá"]])
+        self.assertEqual([paragraph.text for paragraph in result.paragraphs if paragraph.text], ["Úvod", "Konec"])
+
+        # Damaged paragraph properties give the same result as no properties at all.
+        main = "Jméno\x07Telefon\x07\x07Karolína\rBílá\x07777\x07\x07Konec\r"
+        expected = self.word_file(main)
+        damaged = self.word_file(main, "", [T, T, ROW, T, T, T, ROW], bad_page=True)
+
+        def body(data):
+            with ZipFile(io.BytesIO(doc_to_docx(data))) as archive:
+                return archive.read("word/document.xml")
+
+        self.assertEqual(body(damaged), body(expected))
+        self.doc_structure(damaged)
 
     def test_email_formats(self):
         from email import policy
