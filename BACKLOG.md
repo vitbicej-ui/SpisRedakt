@@ -26,4 +26,5 @@ Pořadí je priorita. Orchestrátor bere úkoly shora, stav zapisuje sem: `[ ]` 
 
 ## Hotovo
 
+- [x] 0.8.2: rady k odmítnutým souborům v GUI, vstupy kopírované po blocích, 1,7–2,8× rychlejší pravidla.
 - [x] 0.8.1: důvody chyb v auditu, šablony a pole ve Wordu, opravená a velká PDF, ZIP do 500 MB se všemi formáty, citace judikatury.

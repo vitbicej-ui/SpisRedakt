@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from collections import Counter
 
-VERSION = "0.8.1"
+VERSION = "0.8.2"
 
 
 class Audit:
