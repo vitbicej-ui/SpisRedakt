@@ -11,7 +11,7 @@ Cíl běhu 17. 11. 2026 (termín 18. 11.): jeden ZIP se spisem → `spis_anonymi
 - [x] **2. Úsporný Markdown spisu.** (extrakce 16f935c, vykreslení 278f156, dávka a GUI 3a5b252; opravy po ruční kontrole: citace a OCR dd1aa68, křestní jména 8880a8a) `spis_anonymizovano.md`: extrakce všech textů, čištění OCR, dvoufázová anonymizace, deterministické úspory (záhlaví/zápatí, duplicity, opakované odstavce, citované e-maily, krátké štítky), legenda, obsah s odhadem tokenů, kontrola před vydáním. Volby v GUI „Vytvořit také anonymizovaný ZIP pro kontrolu“ a „Rozdělit po dokumentech“ (výchozí vypnuto).
 - [x] **3. Víceřádkové nadpisy sloupců.** (77a3120) Viz položka v sekci Robustnost; nově i XLSX a Markdown.
 - [x] **4. Vydání spisu bez odmítnutých položek.** Markdown a kontrolní ZIP bez odmítnutých položek, seznam nezpracovaných položek (pořadí + kód), `NEZPRACOVANO.txt`, hlášení v GUI a auditu, README. (3a5b252)
-- [~] **5. Bezpečné výchozí chování.** Kontrolní ZIP bez metadat a původních názvů, skryté listy/řádky/sloupce XLSX, obrázky bez textu začerněné celé, v Markdownu vynechané.
+- [x] **5. Bezpečné výchozí chování.** Kontrolní ZIP bez metadat a původních názvů, skryté listy/řádky/sloupce XLSX, obrázky bez textu začerněné celé, v Markdownu vynechané.
 - [ ] **6. Výkon na velkém spisu.** ZIP ~200 MB / ~300 stran skenů, proudové čtení položek, průběh v GUI, změřený čas.
 - [ ] **7. README a GUI.** Sekce „Výstup pro jazykové modely v cloudu“, souhrn po dokončení, nové rady v `ADVICE`.
 

@@ -192,10 +192,128 @@ def redact_tables(root, rules):
                         node.text = label if position == 0 else ""
 
 
+COMMENT_PARTS = re.compile(r"^(?:word/comments\w*\.xml|xl/comments(?:\d*\.xml|/.*)|xl/persons/.*|ppt/comments/.*"
+                           r"|ppt/commentAuthors\.xml|ppt/authors\.xml)$", re.I)
+# Package properties name authors, companies, files and sheets; the output keeps none of them.
+EMPTY_PROPERTIES = {"docProps/core.xml", "docProps/app.xml", "docProps/custom.xml"}
+
+
 def stripped_part(name):
-    """Parts left out of the output: custom data, previews, signatures, co-author list."""
+    """Parts left out of the output: custom data, previews, signatures, co-author list, comments, printer settings."""
     return (name.startswith(("customXml/", "docProps/thumbnail.", "_xmlsignatures/"))
-            or re.search(r"(?:^|/)people\.xml$", name) is not None)
+            or re.search(r"(?:^|/)people\.xml$", name) is not None
+            or COMMENT_PARTS.match(name) is not None
+            or re.search(r"(?:^|/)(?:printerSettings/|customProperty\d*\.bin$)", name) is not None)
+
+
+def tag_name(node):
+    return etree.QName(node).localname if isinstance(node.tag, str) else ""
+
+
+def truthy(node):
+    """Value of an on/off element such as ``w:vanish`` (a missing value means on)."""
+    value = node.get(f"{{{WORD}}}val")
+    return value is None or value.lower() not in {"0", "false", "off"}
+
+
+def hidden_styles(original):
+    """Ids of Word styles that hide text (directly or through the style they are based on)."""
+    if "word/styles.xml" not in original.namelist():
+        return set()
+    root = xml_root(original.read("word/styles.xml"))
+    based, hidden = {}, set()
+    for style in root.iter(f"{{{WORD}}}style"):
+        identifier = style.get(f"{{{WORD}}}styleId")
+        link = style.find(f"{{{WORD}}}basedOn")
+        based[identifier] = link.get(f"{{{WORD}}}val") if link is not None else None
+        properties = [node for part in ("rPr", "pPr/{%s}rPr" % WORD) for node in style.findall(f"{{{WORD}}}{part}")]
+        if any(truthy(node) for item in properties for node in item.iterchildren(f"{{{WORD}}}vanish")):
+            hidden.add(identifier)
+    changed = True
+    while changed:
+        changed = False
+        for identifier, parent in based.items():
+            if parent in hidden and identifier not in hidden:
+                hidden.add(identifier)
+                changed = True
+    return hidden
+
+
+TRACKED_PROPERTIES = {"rPrChange", "pPrChange", "sectPrChange", "tblPrChange", "tblGridChange", "trPrChange",
+                      "tcPrChange", "tblPrExChange", "numberingChange", "cellIns", "cellDel", "cellMerge"}
+REMOVED = {"del", "moveFrom", "delText", "delInstrText", "moveFromRangeStart", "moveFromRangeEnd",
+           "moveToRangeStart", "moveToRangeEnd", "commentRangeStart", "commentRangeEnd", "commentReference",
+           "annotationRef", "docVars"} | TRACKED_PROPERTIES
+
+
+def remove_node(node):
+    """Remove an element; its tail text stays with the surrounding text."""
+    parent = node.getparent()
+    previous = node.getprevious()
+    if node.tail:
+        if previous is not None:
+            previous.tail = (previous.tail or "") + node.tail
+        else:
+            parent.text = (parent.text or "") + node.tail
+    parent.remove(node)
+
+
+def unwrap_node(node):
+    """Replace an element by its children."""
+    parent = node.getparent()
+    index = parent.index(node)
+    children = list(node)
+    previous = node.getprevious()
+    lead = node.text or ""
+    if lead:
+        if previous is not None:
+            previous.tail = (previous.tail or "") + lead
+        else:
+            parent.text = (parent.text or "") + lead
+    for offset, child in enumerate(children):
+        parent.insert(index + offset, child)
+    if node.tail:
+        last = children[-1] if children else previous
+        if last is not None:
+            last.tail = (last.tail or "") + node.tail
+        else:
+            parent.text = (parent.text or "") + node.tail
+    parent.remove(node)
+
+
+def strip_word_layers(root, hidden):
+    """Accept tracked insertions, drop deletions, change records and comment marks, remove hidden text.
+
+    Reviewers' names, dates, old wording and hidden text are not part of what a reader sees; the output
+    keeps only the accepted visible text.
+    """
+    for node in list(root.iter()):
+        name = tag_name(node)
+        if not name or node.getparent() is None:
+            continue
+        in_properties = tag_name(node.getparent()) in {"rPr", "pPr"}
+        if name in REMOVED or (name in {"ins", "moveTo"} and in_properties):
+            remove_node(node)
+        elif name in {"ins", "moveTo"}:
+            unwrap_node(node)
+    for run in list(root.iter(f"{{{WORD}}}r")):
+        properties = run.find(f"{{{WORD}}}rPr")
+        if properties is None or run.getparent() is None:
+            continue
+        style = properties.find(f"{{{WORD}}}rStyle")
+        if (any(truthy(node) for node in properties.iterchildren(f"{{{WORD}}}vanish", f"{{{WORD}}}specVanish"))
+                or style is not None and style.get(f"{{{WORD}}}val") in hidden):
+            remove_node(run)
+    for paragraph in list(root.iter(f"{{{WORD}}}p")):
+        properties = paragraph.find(f"{{{WORD}}}pPr")
+        style = properties.find(f"{{{WORD}}}pStyle") if properties is not None else None
+        if style is not None and style.get(f"{{{WORD}}}val") in hidden:
+            for run in list(paragraph.iterchildren(f"{{{WORD}}}r")):
+                remove_node(run)
+    # What still names hiding would only hide empty paragraph marks.
+    for node in list(root.iter(f"{{{WORD}}}vanish", f"{{{WORD}}}specVanish")):
+        if node.getparent() is not None:
+            remove_node(node)
 
 
 def black_png():
@@ -248,16 +366,26 @@ def plan_package(original):
             while candidate in names or candidate in renamed.values():
                 candidate = candidate[:-4] + "_.png"
             renamed[name] = candidate
-    dropped = {}
+    dropped, extra = {}, set()
     for name in names:
         if not name.endswith(".rels"):
             continue
         folder, _, rels = name.rpartition("_rels/")
         source = folder + rels.removesuffix(".rels")
-        for node in xml_root(original.read(name)):
+        nodes = list(xml_root(original.read(name)))
+        for node in nodes:
             if node.get("TargetMode") == "External" and node.get("Type", "").endswith(DROPPED_EXTERNAL):
                 dropped.setdefault(source, set()).add(node.get("Id"))
-    return renamed, dropped
+        targets = [(node, (node.get("Target") or "").lstrip("/") if (node.get("Target") or "").startswith("/")
+                    else resolve(folder, node.get("Target") or "")) for node in nodes]
+        if any(stripped_part(full) for _, full in targets):
+            # The drawing that holds the note shapes of removed comments goes with them.
+            for node, full in targets:
+                if stripped_part(full) or node.get("Type", "").endswith("/vmlDrawing"):
+                    dropped.setdefault(source, set()).add(node.get("Id"))
+                    if node.get("Type", "").endswith("/vmlDrawing"):
+                        extra.add(full)
+    return renamed, dropped, extra
 
 
 def redact_fields(root, rules):
@@ -403,13 +531,13 @@ def redact_image(data, extension, rules, tessdata):
     return pixmap.tobytes("png" if extension == "png" else "jpeg", jpg_quality=100)
 
 
-def redact_relationships(name, root, renamed):
+def redact_relationships(name, root, renamed, extra=frozenset()):
     """Fix relationship targets and content types for dropped and renamed parts."""
     if name == "[Content_Types].xml":
         namespace = etree.QName(root).namespace
         for node in list(root):
             part = (node.get("PartName") or "").lstrip("/")
-            if part and stripped_part(part):
+            if part and (stripped_part(part) or part in extra):
                 root.remove(node)
             elif part in renamed:
                 node.set("PartName", "/" + renamed[part])
@@ -430,7 +558,7 @@ def redact_relationships(name, root, renamed):
                 raise ValueError("Soubor načítá externí data nebo obrázek. Vložte je přímo do dokumentu.")
             continue
         full = target.lstrip("/") if target.startswith("/") else resolve(folder, target)
-        if stripped_part(full):
+        if stripped_part(full) or full in extra:
             root.remove(node)
         elif full in renamed:
             node.set("Target", "/" + renamed[full] if target.startswith("/") else relative(folder, renamed[full]))
@@ -449,12 +577,17 @@ def redact_embedded(data, extension, rules, tessdata):
         return target.read_bytes()
 
 
-def redact_part(name, root, suffix, rules, columns, dropped):
+def redact_part(name, root, suffix, rules, columns, dropped, hidden=frozenset()):
+    if suffix == ".docx" and name.startswith("word/"):
+        strip_word_layers(root, hidden)
     for node in list(root.iter()):
         if not isinstance(node.tag, str) or node.getparent() is None:
             continue
         # Template paths and mail-merge sources name the author's computer.
-        if etree.QName(node).localname in {"attachedTemplate", "mailMerge"} or node.get(RELATIONSHIP_ID) in dropped:
+        if tag_name(node) == "pageSetup" and node.get(RELATIONSHIP_ID):
+            # The printer settings go (they name the printer and the user); the page setup stays.
+            del node.attrib[RELATIONSHIP_ID]
+        elif etree.QName(node).localname in {"attachedTemplate", "mailMerge"} or node.get(RELATIONSHIP_ID) in dropped:
             node.getparent().remove(node)
     if columns and name == "xl/sharedStrings.xml":
         columns.redact_shared(root)
@@ -504,11 +637,12 @@ def redact_office(source, destination, rules, tessdata=None):
             raise ValueError("Soubor obsahuje nepodporované obrázky, přílohy, grafy, podpisy nebo externí data.")
         if sum(entry.file_size for entry in original.infolist()) > 1_000_000_000:
             raise ValueError("Rozbalený dokument Office překračuje limit velikosti.")
-        renamed, dropped = plan_package(original)
+        renamed, dropped, extra = plan_package(original)
+        hidden = hidden_styles(original) if suffix == ".docx" else set()
         columns = StructuredColumns(original, rules) if suffix == ".xlsx" else None
         for entry in original.infolist():
             name = entry.filename
-            if stripped_part(name) or entry.is_dir():
+            if stripped_part(name) or name in extra or entry.is_dir():
                 continue
             data = original.read(entry)
             media = MEDIA.fullmatch(name)
@@ -531,17 +665,12 @@ def redact_office(source, destination, rules, tessdata=None):
             elif name.endswith((".xml", ".rels", ".vml")):
                 root = xml_root(data)
                 if name == "[Content_Types].xml" or name.endswith(".rels"):
-                    redact_relationships(name, root, renamed)
-                elif name.startswith("docProps/"):
+                    redact_relationships(name, root, renamed, extra)
+                elif name in EMPTY_PROPERTIES:
                     for node in list(root):
-                        if name.endswith("custom.xml"):
-                            root.remove(node)
-                        elif etree.QName(node).localname in {
-                            "creator", "lastModifiedBy", "title", "subject", "description",
-                            "keywords", "category", "identifier", "Company", "Manager", "Template",
-                        }:
-                            root.remove(node)
+                        root.remove(node)
+                    root.text = None
                 else:
-                    redact_part(name, root, suffix, rules, columns, dropped.get(name, set()))
+                    redact_part(name, root, suffix, rules, columns, dropped.get(name, set()), hidden)
                 data = etree.tostring(root, encoding="UTF-8", xml_declaration=True)
             result.writestr(entry, data)

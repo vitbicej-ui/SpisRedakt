@@ -149,9 +149,30 @@ def redact_geometry(pixmap, rules, text, geometry, transform):
     return redacted
 
 
+def ocr_pixmap(pixmap):
+    """RGB pixmap without alpha for OCR: PyMuPDF does not read gray, indexed or transparent pixmaps.
+
+    Transparent pixels are laid on white (they would turn black); the size stays the same, so boxes
+    found on the copy fit the original pixmap.
+    """
+    if pixmap.colorspace == pdf.csRGB and not pixmap.alpha:
+        return pixmap
+    if pixmap.colorspace is None:
+        raise ValueError("Vložený obrázek nelze vykreslit.")
+    if pixmap.alpha:
+        with pdf.open() as sheet:
+            page = sheet.new_page(width=pixmap.width, height=pixmap.height)
+            page.insert_image(page.rect, pixmap=pixmap)
+            pixmap = page.get_pixmap(dpi=72, colorspace=pdf.csRGB, alpha=False)
+    if pixmap.colorspace != pdf.csRGB:
+        pixmap = pdf.Pixmap(pdf.csRGB, pixmap)
+    return pixmap
+
+
 def recognize_image(pixmap, tessdata):
     if tessdata is None or not (Path(tessdata) / "ces.traineddata").is_file():
         raise ValueError("Obraz vyžaduje česká data OCR (ces.traineddata).")
+    pixmap = ocr_pixmap(pixmap)
     with pdf.open("pdf", pixmap.pdfocr_tobytes(language="ces", tessdata=ocr_path(tessdata))) as recognized:
         page = recognized[0]
         text, boxes = text_geometry(page.get_text("rawdict", flags=pdf.TEXTFLAGS_RAWDICT & ~pdf.TEXT_PRESERVE_IMAGES))

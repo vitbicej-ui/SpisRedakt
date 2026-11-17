@@ -12,6 +12,8 @@ from .reasons import reason_code
 
 
 MARKDOWN_NAME = "spis_anonymizovano"
+# The control archive of an input ZIP has a fixed name: the name of the input may contain personal data.
+ZIP_COPY_NAME = "spis_kontrola"
 RELEASE_CHECK = ("markdown_release_check", "Kontrola výstupu našla možný osobní údaj, soubor nebyl vydán.")
 
 
@@ -220,7 +222,8 @@ def _process_folders(input_root, output_root, tessdata, audit, selected, markdow
                 directory = target_root.joinpath(*(safe_name(part, rules) for part in source.parent.relative_to(source_root).parts))
                 stem = safe_name(source.stem, rules)
                 released = output_suffix(suffix)
-                destination = directory / f"{stem}_anonymizovano{released}"
+                stem = ZIP_COPY_NAME if suffix == ".zip" else f"{stem}_anonymizovano"
+                destination = directory / f"{stem}{released}"
                 if not directory.resolve().is_relative_to(target_root):
                     raise ValueError("Výstupní podsložka odkazuje mimo výstupní složku.")
                 directory.mkdir(parents=True, exist_ok=True)
@@ -241,7 +244,7 @@ def _process_folders(input_root, output_root, tessdata, audit, selected, markdow
                             break
                         except FileExistsError:
                             collisions += 1
-                            destination = directory / f"{stem}_anonymizovano_{collisions + 1}{released}"
+                            destination = directory / f"{stem}_{collisions + 1}{released}"
         except Exception as error:
             if audit:
                 code = (error.code if isinstance(error, FormatError) else
@@ -304,9 +307,25 @@ def copy_limited(stream, target, limit=ARCHIVE_BYTES, block=1 << 20):
     return size
 
 
+BIRTH_NUMBER = re.compile(r"(?<!\d)(\d{6})[-_ .]?(\d{3,4})(?!\d)")
+
+
+def name_variant(value, rules):
+    """The name written the way the rules read text: a slash in the birth number, spaces between words.
+
+    A file name cannot hold a slash and often joins words with underscores, so the plain name would hide
+    a person from the rules. The variant is used only when it reveals something the name itself does not.
+    """
+    variants = [BIRTH_NUMBER.sub(r"\1/\2", value), value.replace("_", " ").replace(".", " ")]
+    variants.append(BIRTH_NUMBER.sub(r"\1/\2", variants[1]))
+    for variant in variants:
+        if variant != value and len(rules.find(variant)) > len(rules.find(value)):
+            value = variant
+    return value
+
+
 def safe_name(value, rules):
-    import re
-    cleaned = rules.replace(value)[0]
+    cleaned = rules.replace(name_variant(value, rules))[0]
     cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", cleaned).strip(" .")
     if cleaned.split(".")[0].upper() in {"CON", "PRN", "AUX", "NUL", *(f"{kind}{i}" for kind in ("COM", "LPT") for i in range(1, 10))}:
         cleaned = "_" + cleaned

@@ -14,6 +14,14 @@ TOKEN = re.compile(rb"\\([a-zA-Z]{1,32})(-?\d{1,10})? ?|\\'([0-9a-fA-F]{2})|\\([
 DISABLED_LINK = "https://example.invalid/"
 # Destinations removed from the output entirely.
 DROP = {"info", "userprops", "nonshppict", "atnid", "atnauthor", "docvar", "passwordhash", "password"}
+# Dropped only from the anonymized copy (the text extraction for Markdown reads these destinations as before).
+COPY_DROP = DROP | {"template", "revtbl", "annotation", "atrfstart", "atrfend", "atnparent", "atndate", "atntime",
+                    "atnref", "atnicn", "atnbookmark", "company", "manager", "operator", "author", "title",
+                    "subject", "keywords", "doccomm", "category", "hlinkbase", "creatim", "revtim", "printim",
+                    "buptim"}
+# In the copy, revision marks (reviewer, time) go and text that was deleted or is hidden is not released.
+REVISION_WORDS = {"revauth", "revauthdel", "revdttm", "revdttmdel", "crauth", "crdate", "pnrauth", "pnrdate",
+                  "trauth", "trdate", "tcelld", "cellins", "celldel", "cellmerge", "insrsid", "delrsid"}
 # Destinations whose text is visible to readers.
 VISIBLE = {"annotation", "footnote", "header", "headerl", "headerr", "headerf", "footer", "footerl",
            "footerr", "footerf", "fldrslt", "shptxt", "pntext", "pntxta", "pntxtb"}
@@ -179,10 +187,10 @@ def codepage(document):
     return "cp1252"
 
 
-def walk(group, state, blocks, checked, pictures):
+def walk(group, state, blocks, checked, pictures, removed=None):
     """Collect visible characters into blocks of [(char, token, offset)]."""
     name, starred = group.destination()
-    if name in DROP:
+    if name in (DROP if removed is None else COPY_DROP):
         group.dropped = True
         return
     if name == "object":
@@ -203,7 +211,9 @@ def walk(group, state, blocks, checked, pictures):
         checked.append((name, state["target"]))
 
     def emit(char, token, offset=None):
-        if state["target"] is not None:
+        if state.get("gone"):
+            removed.append((token, offset))
+        elif state["target"] is not None:
             state["target"].append((char, token, offset))
         elif state["visible"]:
             state["tables"].note(blocks[-1])
@@ -212,7 +222,7 @@ def walk(group, state, blocks, checked, pictures):
     pending, owner = 0, None
     for child in group.children:
         if isinstance(child, Group):
-            walk(child, state, blocks, checked, pictures)
+            walk(child, state, blocks, checked, pictures, removed)
             continue
         if child.kind == "word" and not state.get("nest"):
             state["tables"].param(child.name, child.param)
@@ -232,6 +242,11 @@ def walk(group, state, blocks, checked, pictures):
         pending = 0
         char = None
         if child.kind == "word":
+            if removed is not None and child.name in {"deleted", "v"}:
+                state[child.name] = child.param != 0
+                state["gone"] = state.get("deleted") or state.get("v")
+            elif removed is not None and child.name == "plain":
+                state["deleted"] = state["v"] = state["gone"] = False
             if child.name == "uc" and child.param is not None:
                 state["uc"] = child.param
             elif child.name == "u" and child.param is not None:
@@ -264,7 +279,8 @@ def redact_pictures(pictures, rules, tessdata, redact_image):
         data = bytes.fromhex(b"".join(token.raw for token in hex_tokens).decode("ascii", "replace"))
         redacted = redact_image(data, "png" if kind == "png" else "jpg", rules, tessdata).hex().encode()
         for index, token in enumerate(hex_tokens):
-            token.raw = b"\n".join(redacted[i:i + 128] for i in range(0, len(redacted), 128)) if index == 0 else b""
+            token.raw = b"\n" + b"\n".join(redacted[i:i + 128] for i in range(0, len(redacted), 128)) if index == 0 else b""
+        # A line break delimits the last control word (a digit of the picture size must not join the data).
         group.children = [child for child in group.children if not (isinstance(child, Token) and child.kind == "newline")]
 
 
@@ -278,17 +294,32 @@ def set_text(token, offset, value):
         set_text(fallback, position, "")
 
 
-def collect(document):
-    blocks, checked, pictures, tables = [[]], [], [], Tables()
+def collect(document, copy=False):
+    """Walk the document; with ``copy`` also return the removed characters (for the anonymized copy)."""
+    blocks, checked, pictures, tables, removed = [[]], [], [], Tables(), [] if copy else None
     walk(document, {"visible": True, "uc": 1, "codepage": codepage(document), "target": None,
-                    "tables": tables}, blocks, checked, pictures)
+                    "tables": tables}, blocks, checked, pictures, removed)
     tables.close()
+    if copy:
+        return blocks, checked, pictures, tables.tables, removed
     return blocks, checked, pictures, tables.tables
+
+
+def neutralise(group):
+    """Replace revision marks by an empty group (a bare removal could glue the next word to a control word)."""
+    for child in group.children:
+        if isinstance(child, Group):
+            neutralise(child)
+        elif child.kind == "word" and child.name in REVISION_WORDS:
+            child.raw, child.edits = b"{}", {}
 
 
 def redact_rtf(data, rules, tessdata=None, redact_image=None):
     document = parse(data)
-    blocks, checked, pictures, tables = collect(document)
+    blocks, checked, pictures, tables, removed = collect(document, copy=True)
+    for token, offset in removed:
+        set_text(token, offset, "")
+    neutralise(document)
     if pictures:
         redact_pictures(pictures, rules, tessdata, redact_image)
     labelled = set()
@@ -335,7 +366,7 @@ def redact_rtf(data, rules, tessdata=None, redact_image=None):
             raise ValueError("Citlivý údaj je ve skryté části RTF (pole, záložka nebo rejstřík).")
     output = document.raw()
     # Re-read the result: nothing the rules recognise may remain visible.
-    blocks, checked, _, _ = collect(parse(output))
+    blocks, checked, _, _, _ = collect(parse(output), copy=True)
     for block in blocks + [items for _, items in checked]:
         if rules.find("".join(char for char, _, _ in block)):
             raise ValueError("Kontrola výstupu RTF našla zbývající údaj.")
