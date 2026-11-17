@@ -617,9 +617,24 @@ FORM_FIELD = re.compile(
 )
 
 
+LINE_HYPHEN = re.compile(r"(?<=\w)-[ \t]*[\r\n\v\f\u2028\u2029]\s*(?=\w)")
+
+
+def line_breaks(header):
+    """Normalise a heading split over several lines or paragraphs into one line.
+
+    Breaks, tabs and non-breaking spaces become spaces and a word hyphenated at
+    the end of a line is rejoined ("Datum naro-\nzení"); only recognition of the
+    heading changes, never the cell value.
+    """
+    text = str(header).replace("\u00ad", "")
+    text = LINE_HYPHEN.sub("", text)
+    return " ".join(text.split())
+
+
 def column_kind(header):
     """Return the finding kind for a table column header, or None."""
-    text = " ".join(str(header).replace(" ", " ").split()).strip(" :*").casefold()
+    text = line_breaks(header).strip(" :*").casefold()
     for kind, pattern in COLUMN_HEADERS:
         if pattern.fullmatch(text):
             return kind

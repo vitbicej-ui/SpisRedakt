@@ -295,14 +295,16 @@ def redact_rtf(data, rules, tessdata=None, redact_image=None):
     for rows, keys in tables:
         texts = [[" ".join(t for t in ("".join(char for char, _, _ in block).strip() for block in cell) if t)
                   for cell in row] for row in rows]
-        plan = plan_table([list(enumerate(row)) for row in texts])
+        lines = [[("\n".join(t for t in ("".join(char for char, _, _ in block).strip() for block in cell) if t))
+                  for cell in row] for row in rows]
+        plan = plan_table([list(enumerate(row)) for row in lines])
         # Rows of different shape may be separate tables written back to back:
         # a cell is labelled when the whole table or any such section marks it.
         start = 0
         for end in range(1, len(rows) + 1):
             if end == len(rows) or keys[end] != keys[start]:
                 if (start, end) != (0, len(rows)):
-                    part = plan_table([list(enumerate(row)) for row in texts[start:end]])
+                    part = plan_table([list(enumerate(row)) for row in lines[start:end]])
                     for (index, position), kind in part.items():
                         plan.setdefault((start + index, position), kind)
                 start = end

@@ -897,9 +897,9 @@ class ProcessingTests(unittest.TestCase):
         redact_file(source, target, ".doc", Rules(), None)
         cells = [[cell.text for cell in row.cells] for row in Document(target).tables[0].rows]
         self.assertEqual(cells[1][1], "[TELEFON-1]")
-        # A two-line heading ("Jméno" / "a příjmení") is not recognized as a name column,
-        # so only the structure is checked for the name cell.
-        self.assertEqual(cells[1][0], "Karolína\nBílá")
+        # The two-line heading ("Jméno" / "a příjmení") marks a name column, so the
+        # whole cell gets a label (its empty second paragraph remains).
+        self.assertEqual(cells[1][0], "[OSOBA-1]\n")
 
         # Text around the table stays in paragraphs and the table does not end early.
         doc = self.word_file("Před\r" + grid + "Za\r", "", [(0, 0, 0)] + props)

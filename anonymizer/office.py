@@ -138,6 +138,26 @@ class StructuredColumns:
                 etree.SubElement(item, f"{{{SHEET}}}t").text = self.shared_labels[index]
 
 
+def spaced_text(cell, table, namespace):
+    """Text of a Word or PowerPoint cell with paragraph and line breaks kept as newlines.
+
+    Used only to recognise headings split over several paragraphs; the cell
+    value itself is read from the text nodes.
+    """
+    parts, table_tag = [], f"{{{namespace}}}tbl"
+    for node in cell.iter():
+        if not isinstance(node.tag, str) or next(node.iterancestors(table_tag), None) is not table:
+            continue
+        name = etree.QName(node).localname
+        if name in {"p", "br", "cr"}:
+            parts.append("\n")
+        elif name == "tab":
+            parts.append(" ")
+        elif name == "t":
+            parts.append(node.text or "")
+    return "".join(parts)
+
+
 def redact_tables(root, rules):
     """Label whole Word and PowerPoint table cells under a personal-data header."""
     for namespace in (WORD, DRAW):
@@ -158,12 +178,13 @@ def redact_tables(root, rules):
                             continue
                     nodes = [node for node in cell.iter(f"{{{namespace}}}t")
                              if next(node.iterancestors(table_tag), None) is table]
-                    cells.append((column, nodes, "".join(node.text or "" for node in nodes)))
+                    cells.append((column, nodes, "".join(node.text or "" for node in nodes),
+                                  spaced_text(cell, table, namespace)))
                     column += int(width) if width and width.isdecimal() else 1
                 rows.append(cells)
-            plan = plan_table([[(column, text) for column, _, text in cells] for cells in rows])
+            plan = plan_table([[(column, plan_text) for column, _, _, plan_text in cells] for cells in rows])
             for (index, i), kind in plan.items():
-                _, nodes, text = rows[index][i]
+                _, nodes, text, _ = rows[index][i]
                 label = rules.cell(kind, text)
                 if label:
                     # The first run keeps its formatting; the rest of the cell is emptied.

@@ -168,7 +168,8 @@ def label_cell(cell, paragraphs, kind, text, rules):
 def redact_tables(root, rules):
     for table in root.iter(TABLE + "table"):
         rows = list(table_rows(table))
-        plan = plan_table([[(column, text) for column, _, text, _ in cells] for cells in rows])
+        plan = plan_table([[(column, "\n".join(block_text(node) for node in paragraphs))
+                            for column, _, _, paragraphs in cells] for cells in rows])
         for (index, position), kind in plan.items():
             _, cell, text, paragraphs = rows[index][position]
             if paragraphs:
