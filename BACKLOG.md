@@ -6,12 +6,12 @@ Pořadí je priorita. Orchestrátor bere úkoly shora, stav zapisuje sem: `[ ]` 
 
 Cíl běhu 17. 11. 2026 (termín 18. 11.): jeden ZIP se spisem → `spis_anonymizovano.md` pro jazykové modely v cloudu. Tato sekce má přednost před ostatními. Náhled v GUI, ruční vyznačení ploch, jednotné pseudonymy mezi dávkami a převod přes Office jsou do té doby odloženy.
 
-- [x] **0. Syntetický spis a detektor úniků.** (473dd51, opraveno 8ce9b00; počáteční úniky v kontrolních kopiích: JMENO 1, TELEFON 2, EMAIL 2, UCET 1 – účet zalomený na další řádek, jméno rozdělené spojovníkem a e-mail ve skenu, `@` čtený OCR jako `©`, telefon v PDF po OCR; opravuje se) Generátor syntetického ZIPu se všemi formáty a soudními šablonami, nezávislý detektor úniků (všechny vrstvy výstupu, varianty bez diakritiky, verzálkami, s mezerami, v pádech), vypisuje jen počty podle druhu.
+- [x] **0. Syntetický spis a detektor úniků.** (473dd51, opraveno 8ce9b00; počáteční úniky v kontrolních kopiích: JMENO 1, TELEFON 2, EMAIL 2, UCET 1 – účet zalomený na další řádek, jméno rozdělené spojovníkem a e-mail ve skenu, `@` čtený OCR jako `©`, telefon v PDF po OCR) Generátor syntetického ZIPu se všemi formáty a soudními šablonami, nezávislý detektor úniků (všechny vrstvy výstupu, varianty bez diakritiky, verzálkami, s mezerami, v pádech), vypisuje jen počty podle druhu.
 - [x] **1. Samotná příjmení v celém spisu.** (d34ded5, dvoufázová dávka 3a5b252) Dvoufázové zpracování ZIPu i dávky, příjmení ve všech pádech a obou rodech, „pan/paní + slovo s velkým písmenem“ jako osoba.
-- [~] **2. Úsporný Markdown spisu.** (extrakce 16f935c, vykreslení 278f156, dávka a GUI 3a5b252; opravuje se: samotné křestní jméno, neznámé křestní jméno před známým příjmením, odkaz na citovaný e-mail, OCR šedotónových PNG) `spis_anonymizovano.md`: extrakce všech textů, čištění OCR, dvoufázová anonymizace, deterministické úspory (záhlaví/zápatí, duplicity, opakované odstavce, citované e-maily, krátké štítky), legenda, obsah s odhadem tokenů, kontrola před vydáním. Volby v GUI „Vytvořit také anonymizovaný ZIP pro kontrolu“ a „Rozdělit po dokumentech“ (výchozí vypnuto).
+- [x] **2. Úsporný Markdown spisu.** (extrakce 16f935c, vykreslení 278f156, dávka a GUI 3a5b252; opravy po ruční kontrole: citace a OCR dd1aa68, křestní jména 8880a8a) `spis_anonymizovano.md`: extrakce všech textů, čištění OCR, dvoufázová anonymizace, deterministické úspory (záhlaví/zápatí, duplicity, opakované odstavce, citované e-maily, krátké štítky), legenda, obsah s odhadem tokenů, kontrola před vydáním. Volby v GUI „Vytvořit také anonymizovaný ZIP pro kontrolu“ a „Rozdělit po dokumentech“ (výchozí vypnuto).
 - [x] **3. Víceřádkové nadpisy sloupců.** (77a3120) Viz položka v sekci Robustnost; nově i XLSX a Markdown.
 - [x] **4. Vydání spisu bez odmítnutých položek.** Markdown a kontrolní ZIP bez odmítnutých položek, seznam nezpracovaných položek (pořadí + kód), `NEZPRACOVANO.txt`, hlášení v GUI a auditu, README. (3a5b252)
-- [ ] **5. Bezpečné výchozí chování.** Kontrolní ZIP bez metadat a původních názvů, skryté listy/řádky/sloupce XLSX, obrázky bez textu začerněné celé, v Markdownu vynechané.
+- [~] **5. Bezpečné výchozí chování.** Kontrolní ZIP bez metadat a původních názvů, skryté listy/řádky/sloupce XLSX, obrázky bez textu začerněné celé, v Markdownu vynechané.
 - [ ] **6. Výkon na velkém spisu.** ZIP ~200 MB / ~300 stran skenů, proudové čtení položek, průběh v GUI, změřený čas.
 - [ ] **7. README a GUI.** Sekce „Výstup pro jazykové modely v cloudu“, souhrn po dokončení, nové rady v `ADVICE`.
 
@@ -39,6 +39,8 @@ Cíl běhu 17. 11. 2026 (termín 18. 11.): jeden ZIP se spisem → `spis_anonymi
 - [ ] **Věrný převod DOC a XLS přes nainstalovaný Office** (rozhodnuto 17. 11. 2026: varianta B). Volba v GUI „Převádět DOC/XLS přes Word nebo LibreOffice“, výchozí stav vypnuto, uložená v nastavení aplikace. Když je zapnutá a na počítači je Word nebo Excel (COM přes ctypes/comtypes jen se schválenou závislostí, jinak `soffice --headless --convert-to`, nalezený v obvyklých cestách), převést soubor na DOCX/XLSX v dočasné složce a pokračovat běžnou cestou Office. Bez nalezeného programu nebo při chybě použít dnešní vlastní převod. Žádná síť, žádné makro, převod s vypnutými makry a aktualizacemi odkazů. Novou závislost (např. pywin32) označ `[?]`.
 
 ## Hotovo
+
+- [x] 0.9.0: spis jako úsporný Markdown pro cloudové modely, samotná příjmení a křestní jména v celém spisu, víceřádkové nadpisy sloupců, vydání spisu bez odmítnutých položek, detektor úniků.
 
 - [x] 0.8.2: rady k odmítnutým souborům v GUI, vstupy kopírované po blocích, 1,7–2,8× rychlejší pravidla.
 - [x] 0.8.1: důvody chyb v auditu, šablony a pole ve Wordu, opravená a velká PDF, ZIP do 500 MB se všemi formáty, citace judikatury.

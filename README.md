@@ -1,4 +1,4 @@
-# SpisRedakt 0.8.2
+# SpisRedakt 0.9.0
 
 Offline aplikace pro Windows pro dávkové zpracování DOCX, XLSX, PPTX a PDF. Vznikla nezávisle s funkční inspirací z [veřejného popisu SKRYI](https://www.skryi.cz/index.html). Licence projektu je AGPL-3.0-only.
 
