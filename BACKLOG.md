@@ -13,7 +13,7 @@ Cíl běhu 17. 11. 2026 (termín 18. 11.): jeden ZIP se spisem → `spis_anonymi
 - [x] **4. Vydání spisu bez odmítnutých položek.** Markdown a kontrolní ZIP bez odmítnutých položek, seznam nezpracovaných položek (pořadí + kód), `NEZPRACOVANO.txt`, hlášení v GUI a auditu, README. (3a5b252)
 - [x] **5. Bezpečné výchozí chování.** Kontrolní ZIP bez metadat a původních názvů, skryté listy/řádky/sloupce XLSX, obrázky bez textu začerněné celé, v Markdownu vynechané.
 - [ ] **6. Výkon na velkém spisu.** ZIP ~200 MB / ~300 stran skenů, proudové čtení položek, průběh v GUI, změřený čas.
-- [ ] **7. README a GUI.** Sekce „Výstup pro jazykové modely v cloudu“, souhrn po dokončení, nové rady v `ADVICE`.
+- [x] **7. README a GUI.** Sekce „Výstup pro jazykové modely v cloudu“, souhrn po dokončení, nové rady v `ADVICE`.
 
 ## Robustnost u skutečných spisů
 

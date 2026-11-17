@@ -1,4 +1,4 @@
-# Ruční test verze 0.8.1
+# Ruční test verze 0.9.0
 
 Testujte jen na kopiích dokumentů v místní složce mimo synchronizované úložiště. Výstupy nesdílejte, dokud je člověk neporovná s originálem.
 
@@ -23,6 +23,7 @@ U každého výstupu otevřete originál a výstup vedle sebe a zapište si do t
 | DOC, XLS | starší dokumenty a sešity | Výstup je DOCX/XLSX bez formátování, obrázky nahrazuje `[OBRÁZEK VYNECHÁN]`. |
 | PDF, TIFF | skeny, vícestránkové TIFF, razítka | Výstup je PDF z obrazů, citlivý text je začerněn. Razítka, podpisy a rukopis zkontrolujte ručně. |
 | EML, MSG | e-mail s přílohou, HTML zprávou a více příjemci | Výstup je EML. Otevře se v Outlooku nebo Thunderbirdu, přílohy jsou anonymizované. |
+| Markdown | otevřít `spis_anonymizovano.md` z dávky se ZIPem a volbou kontrolní kopie, případně i „Rozdělit po dokumentech“ | Legenda štítků a obsah `D1…Dn` odpovídají spisu, sekce „Nezpracované položky“ uvádí skutečně vynechané položky. Namátkou porovnejte texty s originálem a s kontrolním ZIPem (`spis_kontrola.zip`). |
 | Chyby | zašifrovaný soubor, makra, vložený objekt | Soubor se nevydá a audit uvede chybu. |
 
 ## Zpětná vazba

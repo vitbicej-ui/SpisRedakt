@@ -15,6 +15,7 @@ from .reasons import ADVICE, GENERAL_ADVICE, advice
 
 
 PROGRESS_INTERVAL = 0.25
+REMINDER = ("Před nahráním zkontrolujte nezpracované položky a namátkou porovnejte výstup s originálem.")
 
 
 def number(value):
@@ -57,6 +58,7 @@ class BatchWorker(QThread):
         self.result.emit(f"Nezpracovaných položek: {len(skipped)}")
         for order, code in skipped:
             self.result.emit(f"    Položka {order}: {ADVICE.get(code, GENERAL_ADVICE)}")
+        self.result.emit(REMINDER)
 
     def run(self):
         try:
