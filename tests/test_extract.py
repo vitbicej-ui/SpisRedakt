@@ -364,6 +364,35 @@ class Pdf(Base):
         self.assertIn("Novák", " ".join(b.text for b in blocks))
 
     @unittest.skipUnless(TESSDATA, "chybí SPISREDAKT_TEST_TESSDATA")
+    def test_gray_rgba_and_gray_tiff_images_are_read(self):
+        rgb = scan_pixmap()
+        gray = pdf.Pixmap(pdf.csGRAY, rgb)
+        rgba = pdf.Pixmap(rgb, 1)
+        for name, pixmap in (("g.png", gray), ("a.png", rgba)):
+            document = self.one(name, pixmap.tobytes("png"), tessdata=TESSDATA)
+            self.assertIn("Novák", document.pages[0].blocks[0].text, name)
+        tiff = self.one("g.tif", tiff_bytes([gray]), tessdata=TESSDATA)
+        self.assertIn("Novák", tiff.pages[0].blocks[0].text)
+        # a gray picture embedded in a DOCX
+        data = archive([
+            ("[Content_Types].xml", "<Types/>"),
+            ("word/document.xml", f'<w:document {WNS}><w:body>' + paragraph(
+                '<w:r><w:drawing><a:blip xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+                'r:embed="rId5"/></w:drawing></w:r>') + '</w:body></w:document>'),
+            ("word/_rels/document.xml.rels",
+             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+             '<Relationship Id="rId5" Type="x/image" Target="media/image1.png"/></Relationships>'),
+            ("word/media/image1.png", gray.tobytes("png"))])
+        block = self.blocks(self.one("a.docx", data, tessdata=TESSDATA), "image")[0]
+        self.assertIn("Novák", block.text)
+
+    def test_pixmap_is_rgb_without_alpha(self):
+        rgb = scan_pixmap()
+        for source in (pdf.Pixmap(pdf.csGRAY, rgb), pdf.Pixmap(rgb, 1), rgb):
+            pix = extract._pixmap(source.tobytes("png"))
+            self.assertEqual((pix.colorspace.name, pix.alpha), ("DeviceRGB", 0))
+
+    @unittest.skipUnless(TESSDATA, "chybí SPISREDAKT_TEST_TESSDATA")
     def test_png_and_tiff(self):
         pixmap = scan_pixmap()
         png = self.one("a.png", pixmap.tobytes("png"), tessdata=TESSDATA)

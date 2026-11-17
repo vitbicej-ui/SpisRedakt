@@ -285,42 +285,97 @@ def _table_entries(raw_rows, plan, rows):
     return "\n".join(lines), naive
 
 
+def _quoted_plain(lines):
+    """Normalized text of quoted lines: no ``>``, no marker, no leading quoted headers."""
+    texts = [re.sub(r"^[>\s]+", "", line) for line in lines]
+    while texts and (not texts[0].strip() or QUOTE_MARKER.fullmatch(texts[0])
+                     or QUOTED_HEADER.match(texts[0])):
+        texts.pop(0)
+    return _norm(" ".join(texts))
+
+
+def _quote_entries(lines, page):
+    """Split the lines of a quoted region into ``quote`` entries (reply text and ``>`` copies apart)."""
+    runs = []
+    for line in lines:
+        quoted = line.lstrip().startswith(">")
+        if runs and runs[-1][0] == quoted:
+            runs[-1][1].append(line)
+        else:
+            runs.append((quoted, [line]))
+    merged = []
+    for quoted, run in runs:
+        # a marker with its headers but no body belongs to the run that follows
+        if merged and not _quoted_plain(merged[-1][1]):
+            merged[-1] = (quoted, merged[-1][1] + run)
+        else:
+            merged.append((quoted, run))
+    result = []
+    for _, run in merged:
+        text = "\n".join(line for line in run if line.strip())
+        if text:
+            result.append(_Entry("quote", text, text, page, _quoted_plain(run)))
+    return result
+
+
 def _quotes(entries, doc_format):
-    """Turn quoted-reply regions of an e-mail body into ``quote`` entries."""
-    result, run = [], []
+    """Turn quoted-reply regions of an e-mail body into ``quote`` entries.
+
+    A region starts at a marker line (``-----Původní zpráva-----``, ``Dne ... napsal(a):``, ``On ... wrote:``)
+    and lasts to the end of the body, or it is a run of ``>`` lines. The blocks of the body are judged
+    together: the extraction splits a body at blank lines.
+    """
+    result, run, region, text, page = [], [], None, [], 0
 
     def flush():
         if run:
-            lines = [text for e in run for text in e.text.split("\n")]
-            plain = _norm(" ".join(re.sub(r"^[>\s]+", "", line) for line in lines))
-            result.append(_Entry("quote", "\n".join(e.text for e in run), "\n\n".join(e.naive for e in run),
-                                 run[0].page, plain))
+            result.extend(_quote_entries(run, page))
             run.clear()
+        if text:
+            value = "\n".join(text)
+            result.append(_Entry("p", value, value, page))
+            text.clear()
 
-    for index, entry in enumerate(entries):
-        if entry.kind == "p":
-            lines = entry.text.split("\n")
-            start = next((n for n, line in enumerate(lines) if QUOTE_MARKER.fullmatch(line)), None)
-            if start is not None:
-                flush()
-                head = "\n".join(lines[:start])
-                if head.strip():
-                    result.append(_Entry("p", head, head, entry.page))
-                tail = lines[start:]
-                body = tail[1:]
-                while body and (QUOTED_HEADER.match(body[0]) or not body[0].strip()):
-                    body.pop(0)
-                rest = [e for e in entries[index + 1:]]
-                original = "\n".join(tail)
-                plain = _norm(" ".join(re.sub(r"^[>\s]+", "", t) for t in body + [e.text for e in rest]))
-                result.append(_Entry("quote", "\n".join([original] + [e.text for e in rest]),
-                                     "\n\n".join([original] + [e.naive for e in rest]), entry.page, plain))
-                return result
-            if lines and all(line.lstrip().startswith(">") for line in lines if line.strip()):
-                run.append(entry)
-                continue
-        flush()
-        result.append(entry)
+    for entry in entries:
+        if region is not None:
+            region.extend(entry.text.split("\n") + [""])
+            continue
+        if entry.kind != "p":
+            flush()
+            result.append(entry)
+            continue
+        page = entry.page
+        for line in entry.text.split("\n"):
+            if QUOTE_MARKER.fullmatch(line):
+                if text:
+                    value = "\n".join(text)
+                    result.append(_Entry("p", value, value, page))
+                    text.clear()
+                if run:
+                    result.extend(_quote_entries(run, page))
+                    run.clear()
+                region = [line]
+            elif region is not None:
+                region.append(line)
+            elif line.lstrip().startswith(">"):
+                if text:
+                    value = "\n".join(text)
+                    result.append(_Entry("p", value, value, page))
+                    text.clear()
+                run.append(line)
+            else:
+                if run:
+                    result.extend(_quote_entries(run, page))
+                    run.clear()
+                text.append(line)
+        if region is None and text:
+            value = "\n".join(text)
+            result.append(_Entry("p", value, value, page))
+            text.clear()
+        if region is not None:
+            region.append("")
+    if region is not None:
+        result.extend(_quote_entries(region, page))
     flush()
     return result
 
@@ -503,7 +558,7 @@ def render(documents, rules, split=False, version=""):
                     lines.append(f"[shodné s D{d} §{n}]")
                 elif entry.kind == "p" and (item.doc.index, position) in referenced:
                     lines.append(f"§{position} {entry.text}")
-                elif entry.text:
+                elif entry.text and not (entry.text.startswith("[citace: D") and lines and lines[-1] == entry.text):
                     lines.append(entry.text)
         bodies_text[item.doc.index] = short_labels("\n".join(_merge_images(lines)))
     for index, source in duplicate.items():

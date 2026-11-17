@@ -1,7 +1,10 @@
 import re
+import tempfile
 import unittest
+from email.message import EmailMessage
+from pathlib import Path
 
-from anonymizer import markdown
+from anonymizer import extract, markdown
 from anonymizer.extract import Block, Document, Page, Skipped
 from anonymizer.rules import Rules
 
@@ -122,6 +125,62 @@ class MarkdownTests(unittest.TestCase):
         self.assertIn("[citace: D1]", out.text)
         self.assertEqual(out.text.count("posílám podklady"), 1)
         self.assertNotIn("Původní zpráva", out.text)
+
+    def test_quote_in_real_eml_blocks_with_header_and_copy(self):
+        original = "Dobrý den,\nposílám podklady k věci a prosím o jejich potvrzení.\nS pozdravem\nJan\n"
+        quoted = "\n".join("> " + line for line in original.splitlines())
+        reply = ("Děkuji.\n\n-----Původní zpráva-----\nOd: Jan <jan@example.invalid>\nPředmět: Podklady\n\n"
+                 + original + "\n" + quoted + "\n")
+        documents = []
+        with tempfile.TemporaryDirectory() as folder:
+            for index, (name, subject, text) in enumerate(
+                    (("a.eml", "Re: Podklady", reply), ("b.eml", "Podklady", original)), 10):
+                message = EmailMessage()
+                message["From"] = "Jan <jan@example.invalid>"
+                message["To"] = "Eva <eva@example.invalid>"
+                message["Subject"] = subject
+                message.set_content(text)
+                path = Path(folder) / name
+                path.write_bytes(message.as_bytes())
+                documents += [d for d in extract.walk(path)]
+        for number, item in enumerate(documents, 1):
+            item.index = number
+        blocks = [b for b in documents[0].pages[0].blocks if b.kind == "p"]
+        self.assertGreater(len(blocks), 2)          # the body is split at blank lines
+        out = run(documents)
+        reply_part = out.text.split("## D2")[0]
+        self.assertIn("[citace: D2]", reply_part)
+        self.assertEqual(reply_part.count("posílám podklady"), 0)
+        self.assertNotIn("Původní zpráva", reply_part)
+        self.assertNotIn("> ", reply_part)
+        self.assertIn("Děkuji.", reply_part)
+        self.assertEqual(out.text.count("posílám podklady"), 1)
+        header = reply_part.split("Děkuji.")[0].split("## D1 (EML")[1].split("\n", 1)[1]
+        keys = re.findall(r"^([^\W\d_]+):", header, re.M)
+        self.assertTrue(keys and set(keys) <= {"Od", "Komu", "Kopie", "Předmět", "Datum"}, keys)
+
+    def test_quote_blocks_header_and_copy_both_replaced(self):
+        original = "Dobrý den, posílám podklady ke spisu a prosím o jejich včasné potvrzení do konce týdne."
+        mail1 = doc(1, "EML", [p(original)])
+        mail2 = doc(2, "EML", [p("Děkuji."), p("-----Original Message-----\nFrom: x@example.cz\nSubject: Spis"),
+                               p(original), p("> " + original)])
+        out = run([mail1, mail2])
+        self.assertEqual(out.text.count("[citace: D1]"), 1)
+        self.assertEqual(out.text.count("posílám podklady"), 1)
+        self.assertNotIn("Original Message", out.text)
+        self.assertIn("Děkuji.", out.text)
+
+    def test_quote_dne_napsal_with_quoted_headers_and_missing_original(self):
+        original = "Dobrý den, posílám podklady ke spisu a prosím o jejich včasné potvrzení do konce týdne."
+        mail1 = doc(1, "EML", [p(original)])
+        mail2 = doc(2, "EML", [p("Ano."), p("Dne 1. 6. 2026 Jan napsal(a):"), p("> Od: x\n> Předmět: Spis"),
+                               p("> " + original)])
+        mail3 = doc(3, "EML", [p("Ne."), p("On Mon, Jan wrote:"), p("> Tohle je citace zprávy, která ve spisu není, a je dost dlouhá.")])
+        out = run([mail1, mail2, mail3])
+        self.assertIn("[citace: D1]", out.text)
+        self.assertNotIn("napsal(a)", out.text)
+        self.assertIn("On Mon, Jan wrote:", out.text)
+        self.assertIn("Tohle je citace zprávy", out.text)
 
     def test_quote_without_original_is_kept(self):
         mail = doc(1, "EML", [p("Odpověď."), p("> Tohle je citace zprávy, jejíž originál ve spisu není, a je dost dlouhá.")])

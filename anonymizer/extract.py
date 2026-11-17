@@ -198,7 +198,7 @@ def _unique(values):
 # -- images and OCR ----------------------------------------------------------------------
 
 def _pixmap(data):
-    """Return an RGB or gray pixmap of image bytes, or None when it cannot be decoded."""
+    """Return an RGB pixmap (no alpha) of image bytes, or None when it cannot be decoded."""
     try:
         pix = pdf.Pixmap(data)
     except Exception:
@@ -215,14 +215,28 @@ def _pixmap(data):
             pix = pdf.Pixmap(bytes(buffer.data()))
         except Exception:
             return None
-    if pix.alpha or pix.colorspace is None or pix.colorspace.n not in (1, 3):
-        base = pdf.Pixmap(pix, 0) if pix.alpha else pix
-        pix = pdf.Pixmap(pdf.csRGB, base) if base.colorspace is not None else None
-    return pix
+    return _rgb(pix)
+
+
+def _rgb(pix):
+    """RGB pixmap without alpha (PyMuPDF OCR does not read gray, alpha or other colorspaces), or None."""
+    if pix.colorspace is None:
+        return None
+    if pix.alpha and pix.width * pix.height <= MAX_PIXELS:
+        # transparent pixels would turn black; lay the image on a white page instead
+        with pdf.open() as sheet:
+            page = sheet.new_page(width=pix.width, height=pix.height)
+            page.insert_image(page.rect, pixmap=pix)
+            pix = page.get_pixmap(dpi=72, colorspace=pdf.csRGB, alpha=False)
+    base = pdf.Pixmap(pix, 0) if pix.alpha else pix
+    return base if base.colorspace == pdf.csRGB else pdf.Pixmap(pdf.csRGB, base)
 
 
 def ocr_blocks(pixmap, tessdata):
     """OCR a pixmap and return the text paragraphs (lines grouped by vertical gaps)."""
+    pixmap = _rgb(pixmap)
+    if pixmap is None:
+        return []
     text, boxes, _ = recognize_image(pixmap, tessdata)
     rects = {}
     for entry in boxes:
