@@ -2,7 +2,7 @@ import re
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
-from .czech import contextual_findings
+from .czech import LABEL, contextual_findings, structured_identity
 
 
 def key(value):
@@ -34,6 +34,7 @@ class Rules:
     def __init__(self, alias_lines=()):
         self.aliases = {}
         self.labels = {}
+        self.surnames = set()
         self.counts = Counter()
         patterns = []
         for line in alias_lines:
@@ -49,7 +50,7 @@ class Rules:
 
     def find(self, text):
         candidates = [Finding(start, end, kind, key(identity))
-                      for start, end, kind, identity in contextual_findings(text)]
+                      for start, end, kind, identity in contextual_findings(text, self.surnames)]
         if self.custom:
             for match in self.custom.finditer(text):
                 variant = self.variants[match.lastindex - 1]
@@ -76,13 +77,43 @@ class Rules:
 
     def label(self, item):
         identity = (item.kind, item.identity)
+        if item.kind == "OSOBA" and identity not in self.labels:
+            initials = re.fullmatch(r"((?:\w\. ?)+) (\S+)", item.identity)
+            if initials:
+                # "J. Novák" reuses the label of the only known "Jan Novák".
+                first = initials[1][0]
+                matches = {label for (kind, known), label in self.labels.items()
+                           if kind == "OSOBA" and not re.match(r"\w\.", known)
+                           and known.startswith(first) and known.split(" ", 1)[-1] == initials[2]}
+                if len(matches) == 1:
+                    self.labels[identity] = matches.pop()
+            else:
+                self.surnames.add(item.identity.split(" ", 1)[-1])
         if identity not in self.labels:
             self.counts[item.kind] += 1
             self.labels[identity] = f"[{item.kind}-{self.counts[item.kind]}]"
         return self.labels[identity]
 
     def replace(self, text):
-        findings = self.find(text)
-        for item in reversed(findings):
-            text = text[:item.start] + self.label(item) + text[item.end:]
-        return text, len(findings)
+        total = 0
+        # A replacement can expose a new match next to a label; repeat until stable.
+        for _ in range(3):
+            findings = self.find(text)
+            if not findings:
+                break
+            total += len(findings)
+            # Labels are numbered from the end of the text, as in the Office formats.
+            labels = [self.label(item) for item in reversed(findings)][::-1]
+            pieces, position = [], 0
+            for item, label in zip(findings, labels):
+                pieces += [text[position:item.start], label]
+                position = item.end
+            text = "".join(pieces) + text[position:]
+        return text, total
+
+    def cell(self, kind, value):
+        """Label a whole table cell whose column header marks it as personal data."""
+        text = str(value).strip()
+        if not text or LABEL.fullmatch(text):
+            return None
+        return self.label(Finding(0, len(text), kind, structured_identity(kind, text)))

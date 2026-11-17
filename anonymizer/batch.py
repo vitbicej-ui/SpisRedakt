@@ -3,9 +3,10 @@ import tempfile
 import os
 
 from .documents import redact_docx, redact_pdf
-from .formats import SUPPORTED, MAX_BYTES, FormatError, identify, redact_file
+from .formats import SUPPORTED, ARCHIVE_BYTES, FormatError, size_limit, identify, output_suffix, redact_file
 from .rules import Rules
 from .audit import Audit
+from .reasons import reason_code
 
 
 def process_folders(input_root, output_root, tessdata=None, audit_root=None, audit_ready=None, selected=None):
@@ -40,10 +41,12 @@ def _process_folders(input_root, output_root, tessdata, audit, selected):
         collisions = 0
         try:
             with source.open("rb") as stream:
-                data = stream.read(MAX_BYTES + 1)
-            if len(data) > MAX_BYTES:
+                data = stream.read(ARCHIVE_BYTES + 1)
+            if len(data) > ARCHIVE_BYTES:
                 raise FormatError("size_limit", "Vstup překračuje limit velikosti.")
             suffix = identify(data, source.suffix.lower())
+            if len(data) > size_limit(suffix):
+                raise FormatError("size_limit", "Vstup překračuje limit velikosti.")
             if suffix is None and source.suffix.lower() in SUPPORTED:
                 raise FormatError("invalid_signature", "Obsah neodpovídá deklarovanému formátu.")
             if suffix not in SUPPORTED:
@@ -54,12 +57,13 @@ def _process_folders(input_root, output_root, tessdata, audit, selected):
             phase = "prepare"
             directory = target_root.joinpath(*(safe_name(part, rules) for part in source.parent.relative_to(source_root).parts))
             stem = safe_name(source.stem, rules)
-            destination = directory / f"{stem}_anonymizovano{suffix}"
+            released = output_suffix(suffix)
+            destination = directory / f"{stem}_anonymizovano{released}"
             if not directory.resolve().is_relative_to(target_root):
                 raise ValueError("Výstupní podsložka odkazuje mimo výstupní složku.")
             directory.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix=".spisredakt-", dir=directory) as scratch:
-                temporary = Path(scratch) / ("output" + suffix)
+                temporary = Path(scratch) / ("output" + released)
                 phase = "redact_and_validate"
                 attempts = 1
                 if audit:
@@ -78,14 +82,15 @@ def _process_folders(input_root, output_root, tessdata, audit, selected):
                         break
                     except FileExistsError:
                         collisions += 1
-                        destination = directory / f"{stem}_anonymizovano_{collisions + 1}{suffix}"
+                        destination = directory / f"{stem}_anonymizovano_{collisions + 1}{released}"
         except Exception as error:
             if audit:
                 code = (error.code if isinstance(error, FormatError) else
                         "permission_denied" if isinstance(error, PermissionError) else
                         "validation_or_unsupported_feature" if isinstance(error, ValueError) else
                         "io_error" if isinstance(error, OSError) else "processing_error")
-                audit.record("failed", phase=phase, code=code, attempts=attempts, **fields)
+                reason = reason_code(error) if code == "validation_or_unsupported_feature" else None
+                audit.record("failed", phase=phase, code=code, reason=reason, attempts=attempts, **fields)
             reason = str(error) if isinstance(error, FormatError) or type(error) is ValueError else type(error).__name__
             yield source, None, reason
         else:

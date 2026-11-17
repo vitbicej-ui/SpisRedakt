@@ -6,13 +6,38 @@ from zipfile import ZipFile, ZIP_DEFLATED
 
 from lxml import etree
 
+import pymupdf as pdf
+
 from .documents import redact_pdf
 from .office import BLOCKS, redact_office, redact_image
 
 TEXT = {".txt", ".csv", ".tsv", ".json", ".xml"}
 IMAGES = {".png", ".jpg", ".jpeg", ".bmp"}
-SUPPORTED = TEXT | IMAGES | BLOCKS.keys() | {".pdf", ".zip"}
+SCANS = {".tif", ".tiff"}
+ODF = {".odt", ".ods", ".odp"}
+MAIL = {".eml", ".msg"}
+LEGACY = {".doc": ".docx", ".xls": ".xlsx"}
+SUPPORTED = TEXT | IMAGES | SCANS | ODF | MAIL | LEGACY.keys() | BLOCKS.keys() | {".pdf", ".zip", ".rtf"}
+LARGE_FORMATS = {".pdf", ".tif", ".tiff", ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".eml", ".msg",
+                 ".doc", ".xls", ".rtf"}
+# Formats that cannot be written back safely are released in a related format.
+OUTPUT = {".tif": ".pdf", ".tiff": ".pdf", ".msg": ".eml", **LEGACY}
+
+
+def output_suffix(suffix):
+    return OUTPUT.get(suffix, suffix)
 MAX_BYTES = 40_000_000
+# Scans and documents with images are processed page by page or part by part,
+# so they may be much larger than text formats and archives.
+LARGE_BYTES = 400_000_000
+# Archives of a whole case file; members are processed one at a time.
+ARCHIVE_BYTES = 500_000_000
+ARCHIVE_UNPACKED = 2_000_000_000
+ARCHIVE_MEMBERS = 5_000
+
+
+def size_limit(suffix):
+    return ARCHIVE_BYTES if suffix == ".zip" else LARGE_BYTES if suffix in LARGE_FORMATS else MAX_BYTES
 
 
 class FormatError(ValueError):
@@ -24,7 +49,14 @@ class FormatError(ValueError):
 def identify(data, suffix):
     if data.startswith(b"%PDF-"):
         return ".pdf"
-    for signature, detected in ((b"\x89PNG\r\n\x1a\n", ".png"), (b"\xff\xd8\xff", ".jpg"), (b"BM", ".bmp")):
+    if data.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        return identify_ole(data)
+    if suffix == ".eml":
+        return suffix
+    if data.startswith(b"{\\rtf"):
+        return ".rtf"
+    for signature, detected in ((b"\x89PNG\r\n\x1a\n", ".png"), (b"\xff\xd8\xff", ".jpg"), (b"BM", ".bmp"),
+                                (b"II*\x00", ".tif"), (b"MM\x00*", ".tif")):
         if data.startswith(signature):
             return detected
     if data.startswith((b"PK\x03\x04", b"PK\x05\x06")):
@@ -34,9 +66,32 @@ def identify(data, suffix):
                                    ("ppt/presentation.xml", ".pptx")):
                 if "[Content_Types].xml" in names and part in names:
                     return detected
+            from .odf import identify_odf
+
+            detected = identify_odf(archive)
+            if detected:
+                return detected
         return ".zip"
     if suffix in TEXT:
         return suffix
+    return None
+
+
+def identify_ole(data):
+    """Tell Word, Excel and Outlook files apart by their compound-file streams."""
+    import olefile
+
+    try:
+        with olefile.OleFileIO(io.BytesIO(data)) as ole:
+            names = {"/".join(entry) for entry in ole.listdir()}
+    except OSError:
+        return None
+    if "WordDocument" in names:
+        return ".doc"
+    if "Workbook" in names or "Book" in names:
+        return ".xls"
+    if any(name.startswith("__substg1.0_") for name in names):
+        return ".msg"
     return None
 
 
@@ -66,6 +121,17 @@ def transform(value, rules):
         replaced = transform(str(value), rules)
         return value if replaced == str(value) else replaced
     return value
+
+
+def redact_table(rows, rules):
+    """Redact a CSV-like table, labelling whole cells under a personal-data header."""
+    from .czech import plan_table
+
+    rows = list(rows)
+    plan = plan_table([list(enumerate(row)) for row in rows])
+    for index, row in enumerate(rows):
+        yield [(index, i) in plan and rules.cell(plan[index, i], cell) or transform(cell, rules)
+               for i, cell in enumerate(row)]
 
 
 def redact_text(data, suffix, rules):
@@ -98,21 +164,23 @@ def redact_text(data, suffix, rules):
                 pass
         rows = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter, strict=True)
         result = io.StringIO(newline="")
-        csv.writer(result, delimiter=delimiter).writerows(
-            [transform(cell, rules) for cell in row] for row in rows
-        )
+        csv.writer(result, delimiter=delimiter).writerows(redact_table(rows, rules))
         return result.getvalue().encode()
     return transform(text, rules).encode()
 
 
-def redact_archive(data, rules, depth=0, budget=None):
+def redact_archive(source, target, rules, tessdata=None, depth=0, budget=None):
+    """Redact every supported member of a ZIP archive into a new archive.
+
+    ``source`` and ``target`` are paths or binary file objects; members are read
+    one at a time, so the archive is never held in memory as a whole.
+    """
     if budget is None:
-        budget = [MAX_BYTES, 500]
+        budget = [ARCHIVE_UNPACKED, ARCHIVE_MEMBERS]
     if depth >= 3:
         raise FormatError("archive_depth", "Archiv překročil limit vnoření.")
-    output = io.BytesIO()
-    with ZipFile(io.BytesIO(data)) as source, ZipFile(output, "w", ZIP_DEFLATED) as target:
-        for entry in source.infolist():
+    with ZipFile(source) as archive, ZipFile(target, "w", ZIP_DEFLATED) as output:
+        for entry in archive.infolist():
             budget[0] -= entry.file_size
             budget[1] -= 1
             if min(budget) < 0:
@@ -121,41 +189,107 @@ def redact_archive(data, rules, depth=0, budget=None):
                 continue
             if entry.flag_bits & 1:
                 raise FormatError("archive_encrypted", "Archiv obsahuje zašifrovaný soubor.")
-            payload = source.read(entry)
+            if entry.file_size > ARCHIVE_BYTES:
+                raise FormatError("size_limit", "Položka archivu překračuje limit velikosti.")
+            payload = archive.read(entry)
             suffix = identify(payload, Path(entry.filename).suffix.lower())
-            if suffix in TEXT:
-                cleaned = redact_text(payload, suffix, rules)
-                if redact_text(cleaned, suffix, rules) != cleaned:
-                    raise FormatError("residual_data", "Kontrola přílohy našla zbývající údaj.")
-            elif suffix == ".zip":
-                cleaned = redact_archive(payload, rules, depth + 1, budget)
-            else:
+            if suffix == ".zip":
+                cleaned = io.BytesIO()
+                redact_archive(io.BytesIO(payload), cleaned, rules, tessdata, depth + 1, budget)
+                cleaned, released = cleaned.getvalue(), ".zip"
+            elif suffix not in SUPPORTED:
                 raise FormatError("archive_member_unsupported", "Archiv obsahuje nepodporovanou položku.")
-            target.writestr(f"polozka-{len(target.filelist) + 1:04d}{suffix}", cleaned)
-    return output.getvalue()
+            elif len(payload) > size_limit(suffix):
+                raise FormatError("size_limit", "Položka archivu překračuje limit velikosti.")
+            else:
+                cleaned, released = redact_bytes(payload, suffix, rules, tessdata)
+            output.writestr(f"polozka-{len(output.filelist) + 1:04d}{released}", cleaned)
+            del payload, cleaned
+
+
+def redact_scan(source, destination, rules, tessdata):
+    """Redact a (multi-page) TIFF scan through the image-only PDF pipeline."""
+    with pdf.open(source, filetype="tiff") as scan:
+        if not scan.page_count or scan.page_count > 500:
+            raise FormatError("scan_pages", "Sken TIFF je prázdný nebo má příliš mnoho stran.")
+        converted = scan.convert_to_pdf()
+    staged = destination.with_name(destination.stem + "-scan.pdf")
+    try:
+        staged.write_bytes(converted)
+        # Scans always need OCR: there is no text layer to rely on.
+        redact_pdf(staged, destination, rules, tessdata, force_ocr=True)
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 def redact_file(source, destination, suffix, rules, tessdata):
     if suffix == ".pdf":
         redact_pdf(source, destination, rules, tessdata)
+    elif suffix in SCANS:
+        redact_scan(source, destination, rules, tessdata)
+    elif suffix in ODF:
+        from .odf import redact_odf
+
+        redact_odf(source, destination, rules, tessdata, redact_image)
+        with ZipFile(destination) as archive:
+            if archive.testzip() is not None or archive.namelist()[0] != "mimetype":
+                raise FormatError("corrupt_output", "Výstup OpenDocument nelze přečíst.")
+    elif suffix in LEGACY:
+        from .legacy import doc_to_docx, xls_to_xlsx
+
+        converted = (doc_to_docx if suffix == ".doc" else xls_to_xlsx)(source.read_bytes())
+        staged = destination.with_name(destination.stem + "-converted" + LEGACY[suffix])
+        try:
+            staged.write_bytes(converted)
+            redact_file(staged, destination, LEGACY[suffix], rules, tessdata)
+        finally:
+            staged.unlink(missing_ok=True)
+    elif suffix in MAIL:
+        from .mail import redact_eml, redact_msg
+
+        redact = redact_eml if suffix == ".eml" else redact_msg
+        destination.write_bytes(redact(source.read_bytes(), rules, tessdata,
+                                       lambda data, name: redact_bytes(data, name, rules, tessdata),
+                                       redact_image))
+    elif suffix == ".rtf":
+        from .rtf import redact_rtf
+
+        destination.write_bytes(redact_rtf(source.read_bytes(), rules, tessdata, redact_image))
     elif suffix in BLOCKS:
         redact_office(source, destination, rules, tessdata)
         with ZipFile(destination) as archive:
             if archive.testzip() is not None:
                 raise FormatError("corrupt_output", "Výstup Office nelze přečíst.")
     else:
-        data = source.read_bytes()
-        if suffix in TEXT:
-            output = redact_text(data, suffix, rules)
-        elif suffix in IMAGES:
-            output = redact_image(data, suffix[1:], rules, tessdata)
+        if suffix == ".zip":
+            redact_archive(source, destination, rules, tessdata)
         else:
-            output = redact_archive(data, rules)
-        destination.write_bytes(output)
-        reopened = destination.read_bytes()
-        if suffix in TEXT and redact_text(reopened, suffix, rules) != reopened:
-            raise FormatError("residual_data", "Kontrola výstupu našla zbývající údaj.")
+            data = source.read_bytes()
+            if suffix in TEXT:
+                output = redact_text(data, suffix, rules)
+            else:
+                output = redact_image(data, suffix[1:], rules, tessdata)
+            destination.write_bytes(output)
+        if suffix in TEXT:
+            reopened = destination.read_bytes()
+            if redact_text(reopened, suffix, rules) != reopened:
+                raise FormatError("residual_data", "Kontrola výstupu našla zbývající údaj.")
         if suffix == ".zip":
             with ZipFile(destination) as archive:
                 if archive.testzip() is not None:
                     raise FormatError("corrupt_output", "Výstupní archiv nelze přečíst.")
+
+
+def redact_bytes(data, suffix, rules, tessdata, depth=0):
+    """Redact an embedded file (e-mail attachment, archive member); return its bytes and suffix."""
+    import tempfile
+
+    detected = identify(data, suffix)
+    if detected not in SUPPORTED:
+        raise FormatError("attachment_unsupported", "E-mail nebo archiv obsahuje položku v nepodporovaném formátu.")
+    with tempfile.TemporaryDirectory(prefix="SpisRedakt-attachment-") as folder:
+        source = Path(folder) / ("input" + detected)
+        target = Path(folder) / ("output" + output_suffix(detected))
+        source.write_bytes(data)
+        redact_file(source, target, detected, rules, tessdata)
+        return target.read_bytes(), output_suffix(detected)

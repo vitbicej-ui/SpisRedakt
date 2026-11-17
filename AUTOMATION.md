@@ -13,3 +13,7 @@ Pro Codex je vhodný oddělený linuxový workflow, nejprve s ručním spuštěn
 [OpenAI – Codex GitHub Action](https://learn.chatgpt.com/docs/github-action) · [GitHub – zabezpečení Actions](https://docs.github.com/en/actions/reference/security/secure-use)
 
 Plánovaný běh Codexu vyžaduje nastavení v GitHubu a API klíč. Tato verze ho pouze popisuje.
+
+## Orchestrace v Claude Code
+
+Další vývoj řídí agent `orchestrator` (`.claude/agents/orchestrator.md`, model Opus) podle `BACKLOG.md`. Implementaci deleguje na agenty `developer` (`.claude/agents/developer.md`, model Sonnet), kontroluje jejich práci, spouští testy a commituje do pracovní větve. Nic neslučuje a nevydává. Položky označené `[?]` čekají na rozhodnutí člověka. Ruční spuštění: `claude --agent orchestrator`.
