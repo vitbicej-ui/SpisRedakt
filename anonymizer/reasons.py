@@ -49,6 +49,7 @@ REASONS = (
     ("MSG", "msg_unsupported"),
     ("e-mail", "mail_unsupported_or_residual"),
     ("Zašifrovan", "mail_encrypted"),
+    ("Kontrola výstupu našla možný osobní údaj", "markdown_release_check"),
 )
 
 
@@ -116,6 +117,13 @@ ADVICE = {
     "corrupt_output": "Výstup se nepodařilo bezpečně sestavit. Zkuste soubor znovu uložit v původním programu, jinak jej anonymizujte ručně.",
     "residual_data": "Kontrola výstupu našla zbývající údaj, proto se soubor nevydává. Anonymizujte jej ručně.",
 }
+
+ADVICE.update({
+    "markdown_release_check": "Kontrola výstupu našla možný osobní údaj, soubor nebyl vydán. Zpracujte spis znovu; "
+                              "pokud se chyba opakuje, rozdělte spis a zjistěte, která položka ji způsobuje.",
+    "format_unsupported": "Formát položky aplikace nepodporuje. Převeďte ji na podporovaný formát (například PDF nebo DOCX) a zkuste to znovu.",
+    "processing_error": "Položku se nepodařilo zpracovat. Otevřete ji v původním programu, uložte znovu a zkuste to znovu; jinak ji anonymizujte ručně.",
+})
 
 PERMISSION_ADVICE = "Soubor je otevřený v jiném programu nebo k němu chybí oprávnění. Zavřete jej, zkontrolujte přístup a zkuste to znovu."
 GENERAL_ADVICE = "Otevřete soubor v původním programu, uložte ho znovu a zkuste to znovu; jinak jej anonymizujte ručně."

@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 from zipfile import ZipFile
 
 from docx import Document
@@ -14,6 +15,7 @@ from anonymizer.batch import process_batch, process_folders
 from anonymizer.documents import ocr_path, recognize_image
 from anonymizer import czech, rules as rules_module
 from anonymizer.rules import Rules
+from anonymizer.reasons import ADVICE, advice, reason_code
 
 
 def synthetic_file(paragraphs=1000):
@@ -136,7 +138,13 @@ class ProcessingTests(unittest.TestCase):
         self.assertEqual(len(results), 7)
         for original, output, reason in results:
             if original.name == "bad.zip":
-                self.assertIsNone(output)
+                # The unsupported member is left out; the archive itself is released with a list of codes.
+                self.assertIsNotNone(output, reason)
+                with ZipFile(output) as archive:
+                    self.assertEqual(archive.namelist(), ["NEZPRACOVANO.txt"])
+                    note = archive.read("NEZPRACOVANO.txt").decode()
+                self.assertIn("Položka 1: archive_member_unsupported", note)
+                self.assertNotIn("unknown", note)
                 continue
             self.assertIsNotNone(output, reason)
             if output.suffix == ".zip":
@@ -1623,6 +1631,362 @@ class SurnameTests(unittest.TestCase):
         # Labels never contain a found string.
         out = rules.replace("Žalobce Tadeáš Wolf")[0]
         self.assertNotIn("Wolf", out)
+
+
+class CaseFileTests(unittest.TestCase):
+    """Two-phase batch, Markdown release and the incomplete-archive behaviour."""
+
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        self.source, self.target, self.audit = (self.root / name for name in ("in", "out", "audit"))
+        self.source.mkdir()
+        self.target.mkdir()
+
+    def run_case(self, **kwargs):
+        summaries = []
+        results = list(process_folders(self.source, self.target, audit_root=self.audit,
+                                       summary=summaries.append, **kwargs))
+        return results, summaries
+
+    def audit_log(self):
+        return next(self.audit.glob("*/events.jsonl")).read_text(encoding="utf-8")
+
+    def case_zip(self):
+        word = io.BytesIO()
+        document = Document()
+        document.add_paragraph("Smlouvu uzavřela Karolína Bílá, telefon 777 123 456.")
+        document.save(word)
+        with pdf.open() as doc:
+            doc.new_page().insert_text((72, 90), "Kontakt spravce.spisu@example.test", fontsize=16)
+            portable = doc.tobytes()
+        with ZipFile(self.source / "tajny_spis_novak.zip", "w") as archive:
+            archive.writestr("slozka_novak/smlouva_novak.docx", word.getvalue())
+            archive.writestr("slozka_novak/podani_novak.pdf", portable)
+            archive.writestr("zasifrovano_novak.txt", b"zasifrovano")
+            archive.writestr("neznamy_novak.bin", b"unknown")
+
+    def test_surname_found_in_later_file_is_replaced_in_earlier_one(self):
+        (self.source / "a.txt").write_text("Hájka jsme předvolali.", encoding="utf-8")
+        (self.source / "b.txt").write_text("Svědek Karel Hájek, nar. 1. 2. 1980.", encoding="utf-8")
+        results, summaries = self.run_case(markdown=True, copies=True)
+        self.assertEqual(len(results), 3)
+        self.assertIsNone(results[0][0])
+        markdown_path = results[0][1]
+        self.assertEqual(markdown_path, (self.target / "spis_anonymizovano.md").resolve())
+        self.assertEqual(summaries[0]["markdown"], markdown_path)
+        self.assertEqual((summaries[0]["documents"], summaries[0]["skipped"], summaries[0]["error"]), (2, [], ""))
+        for path in [markdown_path, *(target for _, target, _ in results[1:])]:
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("Hájk", text, path.name)
+            self.assertNotIn("1980", text)
+        copy = (self.target / "a_anonymizovano.txt").read_text(encoding="utf-8")
+        self.assertTrue(copy.startswith("[OSOBA-1]"), copy)
+
+    def test_markdown_only_and_collision(self):
+        (self.source / "a.txt").write_text("Telefon 777 123 456.", encoding="utf-8")
+        for expected in ("spis_anonymizovano.md", "spis_anonymizovano_2.md"):
+            results, _ = self.run_case(markdown=True, copies=False)
+            self.assertEqual([(source, target.name) for source, target, _ in results], [(None, expected)])
+        self.assertEqual(sorted(path.name for path in self.target.iterdir()),
+                         ["spis_anonymizovano.md", "spis_anonymizovano_2.md"])
+
+    def test_zip_with_refused_items(self):
+        self.case_zip()
+        original = ZipFile.infolist
+
+        def marked(archive):
+            # The entry is marked as encrypted without a real cipher.
+            result = original(archive)
+            for info in result:
+                if info.filename == "zasifrovano_novak.txt":
+                    info.flag_bits |= 1
+            return result
+
+        with mock.patch.object(ZipFile, "infolist", marked):
+            results, summaries = self.run_case(markdown=True, copies=True)
+        self.assertEqual(len(results), 2)
+        markdown_path = results[0][1]
+        text = markdown_path.read_text(encoding="utf-8")
+        self.assertIn("## Nezpracované položky", text)
+        self.assertIn("archive_encrypted", text)
+        self.assertIn("archive_member_unsupported", text)
+        self.assertEqual(sorted(code for _, code in summaries[0]["skipped"]),
+                         ["archive_encrypted", "archive_member_unsupported"])
+        self.assertEqual(summaries[0]["documents"], 2)
+        self.assertNotIn("Karolína", text)
+        self.assertNotIn("777 123", text)
+        source, output, error = results[1]
+        self.assertIsNotNone(output, error)
+        with ZipFile(output) as archive:
+            # Numbering follows the input order; the gaps are the refused items.
+            self.assertEqual(archive.namelist(), ["polozka-0001.docx", "polozka-0002.pdf", "NEZPRACOVANO.txt"])
+            note = archive.read("NEZPRACOVANO.txt").decode()
+            self.assertIn("Položka 3: archive_encrypted", note)
+            self.assertIn("Položka 4: archive_member_unsupported", note)
+            self.assertEqual(Document(io.BytesIO(archive.read("polozka-0001.docx"))).paragraphs[0].text,
+                             "Smlouvu uzavřela [OSOBA-1], telefon [TELEFON-1].")
+        # Neither the names of the inputs nor of the members appear anywhere.
+        everything = text + note + self.audit_log()
+        for name in ("novak", "tajny", "slozka", "smlouva", "podani", "zasifrovano", "neznamy"):
+            self.assertNotIn(name, everything.lower(), name)
+        with ZipFile(output) as archive:
+            self.assertNotIn("novak", " ".join(archive.namelist()).lower())
+        log = self.audit_log()
+        self.assertIn('"state": "released"', log)
+        self.assertIn('"skipped_members": [[3, "archive_encrypted"], [4, "archive_member_unsupported"]]', log)
+        self.assertIn('"skipped": [[3, "archive_encrypted"], [4, "archive_member_unsupported"]]', log)
+
+    def test_archive_stops_only_on_limits(self):
+        from anonymizer import formats
+
+        def build(entries):
+            data = io.BytesIO()
+            with ZipFile(data, "w") as archive:
+                for name, payload in entries:
+                    archive.writestr(name, payload)
+            return data
+
+        nested = build([("a.txt", "Telefon 777 123 456"), ("b.bin", b"x")])
+        outer = build([("c.txt", "text"), ("d.zip", nested.getvalue()), ("e.bin", b"y")])
+        result = io.BytesIO()
+        skipped = formats.redact_archive(io.BytesIO(outer.getvalue()), result, Rules())
+        self.assertEqual(skipped, [(2, "archive_member_unsupported"), (3, "archive_member_unsupported")])
+        with ZipFile(result) as archive:
+            self.assertEqual(archive.namelist(), ["polozka-0001.txt", "polozka-0002.zip", "NEZPRACOVANO.txt"])
+            with ZipFile(io.BytesIO(archive.read("polozka-0002.zip"))) as inner:
+                self.assertEqual(inner.namelist(), ["polozka-0001.txt", "NEZPRACOVANO.txt"])
+                self.assertEqual(inner.read("polozka-0001.txt"), b"Telefon [TELEFON-1]")
+                self.assertIn("Položka 2: archive_member_unsupported", inner.read("NEZPRACOVANO.txt").decode())
+        # Nothing missing: no note.
+        clean = io.BytesIO()
+        self.assertEqual(formats.redact_archive(build([("a.txt", "text")]), clean, Rules()), [])
+        with ZipFile(clean) as archive:
+            self.assertEqual(archive.namelist(), ["polozka-0001.txt"])
+        # A member failing during redaction is left out in every form.
+        broken = build([("ok.txt", "text"), ("bad.docx", b"PK\x03\x04not an office file")])
+        output = io.BytesIO()
+        skipped = formats.redact_archive(broken, output, Rules())
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0][0], 2)
+        with ZipFile(output) as archive:
+            self.assertEqual(archive.namelist(), ["polozka-0001.txt", "NEZPRACOVANO.txt"])
+        # The limits still stop the whole archive.
+        with mock.patch.object(formats, "ARCHIVE_UNPACKED", 3), self.assertRaises(formats.FormatError) as stopped:
+            formats.redact_archive(build([("a.txt", "text")]), io.BytesIO(), Rules())
+        self.assertEqual(stopped.exception.code, "archive_limit")
+        with self.assertRaises(formats.FormatError) as stopped:
+            formats.redact_archive(build([("a.txt", "text")]), io.BytesIO(), Rules(), depth=3)
+        self.assertEqual(stopped.exception.code, "archive_depth")
+        with self.assertRaises(Exception):
+            formats.redact_archive(io.BytesIO(b"not an archive"), io.BytesIO(), Rules())
+
+    def test_release_check_blocks_leaking_markdown(self):
+        from anonymizer import markdown as markdown_module
+        from anonymizer.markdown import Output
+
+        (self.source / "a.txt").write_text("Svědek Karel Hájek, nar. 1. 2. 1980, rodné číslo 800201/1230.",
+                                           encoding="utf-8")
+        for leaked in ("Svědek Karel Hájek", "Rodné číslo 800201/1230", "Narozen 1. 2. 1980", "Hájek"):
+            for path in self.target.glob("spis_anonymizovano*"):
+                path.unlink()
+            with mock.patch.object(markdown_module, "render", return_value=Output(text=leaked, documents=1)):
+                results, summaries = self.run_case(markdown=True, copies=False)
+            self.assertEqual(len(results), 1)
+            self.assertIsNone(results[0][1], leaked)
+            self.assertIn("nebyl vydán", results[0][2])
+            self.assertEqual(reason_code(results[0][2]), "markdown_release_check")
+            self.assertEqual(advice(results[0][2]), ADVICE["markdown_release_check"])
+            self.assertEqual(summaries[0]["error"], results[0][2])
+            self.assertIsNone(summaries[0]["markdown"])
+            self.assertEqual(list(self.target.glob("spis_anonymizovano*")), [], leaked)
+            self.assertEqual(list(self.target.iterdir()), [])
+            for forbidden in ("Hájek", "800201", "1980"):
+                self.assertNotIn(forbidden, results[0][2])
+        log = self.audit_log()
+        self.assertIn('"state": "failed"', log)
+        self.assertIn("markdown_release_check", log)
+        self.assertNotIn("Hájek", log)
+
+    def test_release_check_uses_independent_detector(self):
+        from anonymizer.batch import check_release, FormatError
+
+        rules = Rules()
+        rules.replace("Svědek Karel Hájek, nar. 1. 2. 1980, e-mail karel@example.test, tel. 777 123 456.")
+        check_release(["Svědek [O1], nar. [N1], [E1], [T1]."], rules)
+        for leaked in ("Hájek", "Karel Hájek", "karel@example.test", "777 123 456", "narozen 1980-02-01"):
+            with self.assertRaises(FormatError, msg=leaked) as stopped:
+                check_release([f"Text {leaked} dále."], rules)
+            self.assertEqual(stopped.exception.code, "markdown_release_check")
+
+    def test_split_mode_writes_folder(self):
+        (self.source / "a.txt").write_text("Svědek Karel Hájek uvedl, že byl doma.", encoding="utf-8")
+        (self.source / "b.txt").write_text("Hájka jsme předvolali.", encoding="utf-8")
+        for expected in ("spis_anonymizovano", "spis_anonymizovano_2"):
+            results, summaries = self.run_case(markdown=True, copies=False, split=True)
+            folder = results[0][1]
+            self.assertEqual(folder.name, expected)
+            self.assertEqual(sorted(path.name for path in folder.iterdir()), ["00_obsah.md", "D0001.md", "D0002.md"])
+            for path in folder.iterdir():
+                self.assertNotIn("Hájk", path.read_text(encoding="utf-8"))
+            self.assertEqual(summaries[-1]["markdown"], folder)
+
+    def test_progress_runs_over_the_whole_batch(self):
+        (self.source / "a.txt").write_text("Text jedna.", encoding="utf-8")
+        (self.source / "b.txt").write_text("Text dvě.", encoding="utf-8")
+        seen = []
+        self.run_case(markdown=True, copies=False, progress=lambda items, pages: seen.append((items, pages)))
+        self.assertEqual(max(seen)[0], 2)
+        self.assertEqual(seen, sorted(seen))
+
+    def test_progress_error_is_not_swallowed(self):
+        (self.source / "a.txt").write_text("Text jedna.", encoding="utf-8")
+
+        def stop(items, pages):
+            raise KeyError("stop")
+
+        with self.assertRaises(KeyError):
+            self.run_case(markdown=True, copies=False, progress=stop)
+
+    def test_unsupported_and_oversized_inputs_are_listed_as_not_processed(self):
+        (self.source / "a.txt").write_text("Text.", encoding="utf-8")
+        (self.source / "b.bin").write_bytes(b"unknown")
+        results, summaries = self.run_case(markdown=True, copies=False)
+        self.assertEqual(summaries[0]["skipped"], [(2, "format_unsupported")])
+        self.assertIn("položka 2: format_unsupported", results[0][1].read_text(encoding="utf-8"))
+
+    def test_email_attachment_with_refused_member_still_stops_the_mail(self):
+        from anonymizer import formats
+
+        archive = io.BytesIO()
+        with ZipFile(archive, "w") as zipped:
+            zipped.writestr("a.txt", "text")
+            zipped.writestr("b.bin", b"unknown")
+        with self.assertRaises(formats.FormatError) as stopped:
+            formats.redact_bytes(archive.getvalue(), ".zip", Rules(), None)
+        self.assertEqual(stopped.exception.code, "attachment_unsupported")
+
+
+class CaseFileGuiTests(unittest.TestCase):
+    def setUp(self):
+        from PySide6.QtCore import QSettings
+        from PySide6.QtWidgets import QApplication
+
+        self.app = QApplication.instance() or QApplication([])
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        # The settings live in a file of the test; the real user profile is never touched.
+        self.ini = str(self.root / "settings.ini")
+        patcher = mock.patch("anonymizer.gui.QSettings", lambda *args: QSettings(self.ini, QSettings.Format.IniFormat))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_options_are_saved_and_restored(self):
+        from PySide6.QtCore import QSettings
+        from anonymizer.gui import Window
+
+        window = Window()
+        window.timer.stop()
+        self.assertEqual(window.options["copies"].text(), "Vytvořit také anonymizovaný ZIP pro kontrolu")
+        self.assertEqual(window.options["split"].text(), "Rozdělit po dokumentech")
+        self.assertFalse(window.options["copies"].isChecked())
+        self.assertFalse(window.options["split"].isChecked())
+        window.options["copies"].setChecked(True)
+        window.options["split"].setChecked(True)
+        settings = QSettings(self.ini, QSettings.Format.IniFormat)
+        self.assertTrue(settings.value("copies", False, bool))
+        self.assertTrue(settings.value("split", False, bool))
+        window.close()
+        again = Window()
+        again.timer.stop()
+        self.assertTrue(again.options["copies"].isChecked())
+        self.assertTrue(again.options["split"].isChecked())
+        again.options["split"].setChecked(False)
+        self.assertFalse(QSettings(self.ini, QSettings.Format.IniFormat).value("split", True, bool))
+
+    def test_options_reach_process_folders(self):
+        from anonymizer.gui import Window
+
+        source, output = self.root / "in", self.root / "out"
+        source.mkdir()
+        output.mkdir()
+        (source / "a.txt").write_text("Text.", encoding="utf-8")
+        window = Window()
+        window.timer.stop()
+        window.source, window.output = str(source), str(output)
+        window.options["copies"].setChecked(True)
+        with mock.patch("anonymizer.gui.BatchWorker") as worker:
+            window.scan()
+            window.scan()
+        self.assertEqual(worker.call_args.kwargs, dict(copies=True, split=False))
+        window.worker = None
+
+    def run_worker(self, results, copies=True, split=True, summary=None):
+        from anonymizer.gui import BatchWorker
+
+        source, output = self.root / "in", self.root / "out"
+        source.mkdir(exist_ok=True)
+        output.mkdir(exist_ok=True)
+        (source / "a.txt").write_text("Text.", encoding="utf-8")
+        worker = BatchWorker(str(source), str(output), None, None, {source / "a.txt"}, copies=copies, split=split)
+        lines, handled = [], []
+        worker.result.connect(lines.append)
+        worker.handled.connect(handled.append)
+        calls = {}
+
+        def fake(*args, **kwargs):
+            calls.update(kwargs)
+            kwargs["progress"](3, 7)
+            if summary:
+                kwargs["summary"](summary)
+            yield from results
+
+        with mock.patch("anonymizer.gui.process_folders", fake):
+            os.environ["SPISREDAKT_AUDIT_DIR"] = str(self.root / "audit")
+            self.addCleanup(os.environ.pop, "SPISREDAKT_AUDIT_DIR", None)
+            worker.run()
+        return calls, lines, handled
+
+    def test_worker_passes_options_and_reports_summary(self):
+        output = (self.root / "out")
+        output.mkdir()
+        markdown_path = output.resolve() / "spis_anonymizovano.md"
+        summary = dict(markdown=markdown_path, documents=12, tokens_before=21800, tokens_after=12300,
+                       skipped=[(5, "archive_encrypted"), (6, "unknown_code")], error="")
+        calls, lines, handled = self.run_worker([(None, markdown_path, "")], copies=False, split=True, summary=summary)
+        self.assertTrue(calls["markdown"])
+        self.assertFalse(calls["copies"])
+        self.assertTrue(calls["split"])
+        self.assertTrue(callable(calls["progress"]) and callable(calls["summary"]))
+        from anonymizer.reasons import ADVICE, GENERAL_ADVICE
+        self.assertIn("Markdown: spis_anonymizovano.md", lines)
+        self.assertIn("Dokumentů ve spisu: 12", lines)
+        self.assertIn("Odhad tokenů: 12 300 (před úpravami 21 800)", lines)
+        self.assertIn("Nezpracovaných položek: 2", lines)
+        self.assertIn(f"    Položka 5: {ADVICE['archive_encrypted']}", lines)
+        self.assertIn(f"    Položka 6: {GENERAL_ADVICE}", lines)
+        self.assertEqual(len(handled), 1)
+
+    def test_worker_reports_release_check_failure(self):
+        from anonymizer.reasons import ADVICE
+        message = "Kontrola výstupu našla možný osobní údaj, soubor nebyl vydán."
+        summary = dict(markdown=None, documents=1, tokens_before=0, tokens_after=0, skipped=[], error=message)
+        _, lines, _ = self.run_worker([(None, None, message)], summary=summary)
+        self.assertIn(f"Markdown nebyl vydán. Chyba: {message}", lines)
+        self.assertIn(f"    Rada: {ADVICE['markdown_release_check']}", lines)
+
+    def test_worker_progress_is_throttled(self):
+        from anonymizer.gui import BatchWorker
+
+        worker = BatchWorker(".", ".", None, None, set())
+        seen = []
+        worker.progress.connect(lambda items, pages: seen.append((items, pages)))
+        for count in range(1000):
+            worker.report_progress(count, count)
+        self.assertLess(len(seen), 5)
+        self.assertEqual(seen[0], (0, 0))
 
 
 class AdviceTests(unittest.TestCase):
