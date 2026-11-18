@@ -125,3 +125,4 @@ Ověřeno orchestrátorem mimo testy vývojářů: ruční příklady příjmen�
 - Předfiltr v `leaks.py` (detektor slouží i jako kontrola před vydáním Markdownu) orchestrátor nezávisle ověřil diferenčním porovnáním se starou verzí: 20 000 náhodných textů se zkomoleninami, 0 rozdílů.
 - Nové riziko: chybně přečtené číslo z OCR projde i do Markdownu (viz backlog „Chybně přečtená čísla z OCR“).
 - Testy: 243, OK. `check_outputs.py` OK. `leak_report.py`: 0 úniků.
+- `d9703fa`: chybně přečtená čísla z OCR (`anonymizer/numbers.py`). Orchestrátor při kontrole našel, že dlouhé číslo ve skenu se zaměněnými písmeny (`604 22l 33O`) zůstávalo, vráceno a opraveno. Kontrola před vydáním teď odmítne i výstup s variantou známé hodnoty o jednu číslici; u spisu to může vést k nevydání celého Markdownu (bezpečné, ale je třeba to sledovat). Testy: 253, OK; `leak_report.py` 0 úniků i v Markdownu.

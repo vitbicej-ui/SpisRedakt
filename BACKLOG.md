@@ -14,7 +14,7 @@ Cíl běhu 17. 11. 2026 (termín 18. 11.): jeden ZIP se spisem → `spis_anonymi
 - [x] **5. Bezpečné výchozí chování.** Kontrolní ZIP bez metadat a původních názvů, skryté listy/řádky/sloupce XLSX, obrázky bez textu začerněné celé, v Markdownu vynechané.
 - [x] **6. Výkon na velkém spisu.** (af3e40f; 200 MB / 300 stran skenů: Markdown 4 min a 475 MB, s kontrolním ZIPem 7 min a 715 MB, 0,34 s na stranu OCR, tokeny 261 tis. → 170 tis.) ZIP ~200 MB / ~300 stran skenů, proudové čtení položek, průběh v GUI, změřený čas.
 - [x] **7. README a GUI.** Sekce „Výstup pro jazykové modely v cloudu“, souhrn po dokončení, nové rady v `ADVICE`.
-- [ ] **Chybně přečtená čísla z OCR.** Když OCR přečte telefon nebo účet chybně (např. `732 123 1609`), pravidla číslo nenajdou a kontrola před vydáním ho nepozná, protože zná jen nalezené hodnoty. Zvážit podezřelé číselné řetězce ve skenech (dlouhé skupiny číslic v kontextu `tel.`, `účet`, `nar.`) nahrazovat štítkem nebo je začernit celé.
+- [x] **Chybně přečtená čísla z OCR.** (d9703fa; čísla za klíčovými slovy všude, dlouhé skupiny číslic ve skenech jako `[CISLO-n]`, detektor hlásí varianty s jednou chybnou číslicí) Když OCR přečte telefon nebo účet chybně (např. `732 123 1609`), pravidla číslo nenajdou a kontrola před vydáním ho nepozná, protože zná jen nalezené hodnoty. Zvážit podezřelé číselné řetězce ve skenech (dlouhé skupiny číslic v kontextu `tel.`, `účet`, `nar.`) nahrazovat štítkem nebo je začernit celé.
 
 ## Robustnost u skutečných spisů
 
