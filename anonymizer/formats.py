@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import tempfile
 from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
 
@@ -9,6 +10,7 @@ from lxml import etree
 import pymupdf as pdf
 
 from .documents import redact_pdf
+from .reasons import reason_code
 from .office import BLOCKS, redact_office, redact_image
 
 TEXT = {".txt", ".csv", ".tsv", ".json", ".xml"}
@@ -46,11 +48,26 @@ class FormatError(ValueError):
         super().__init__(message)
 
 
+SIGNATURES = (b"%PDF-", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", b"{\\rtf", b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff",
+              b"BM", b"II*\x00", b"MM\x00*", b"PK\x03\x04", b"PK\x05\x06")
+HEADER_BYTES = 16
+
+
+def has_signature(head):
+    return head.startswith(SIGNATURES)
+
+
 def identify(data, suffix):
+    """Detect the format of bytes or of a file given as a Path (never reads a whole file into memory)."""
+    source = None
+    if isinstance(data, Path):
+        source = data
+        with source.open("rb") as stream:
+            data = stream.read(HEADER_BYTES)
     if data.startswith(b"%PDF-"):
         return ".pdf"
     if data.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
-        return identify_ole(data)
+        return identify_ole(source or data)
     if suffix == ".eml":
         return suffix
     if data.startswith(b"{\\rtf"):
@@ -60,7 +77,7 @@ def identify(data, suffix):
         if data.startswith(signature):
             return detected
     if data.startswith((b"PK\x03\x04", b"PK\x05\x06")):
-        with ZipFile(io.BytesIO(data)) as archive:
+        with ZipFile(source or io.BytesIO(data)) as archive:
             names = set(archive.namelist())
             for part, detected in (("word/document.xml", ".docx"), ("xl/workbook.xml", ".xlsx"),
                                    ("ppt/presentation.xml", ".pptx")):
@@ -78,12 +95,16 @@ def identify(data, suffix):
 
 
 def identify_ole(data):
-    """Tell Word, Excel and Outlook files apart by their compound-file streams."""
+    """Tell Word, Excel and Outlook files apart by their compound-file streams (bytes or Path)."""
     import olefile
 
     try:
-        with olefile.OleFileIO(io.BytesIO(data)) as ole:
-            names = {"/".join(entry) for entry in ole.listdir()}
+        if isinstance(data, Path):
+            with data.open("rb") as stream, olefile.OleFileIO(stream) as ole:
+                names = {"/".join(entry) for entry in ole.listdir()}
+        else:
+            with olefile.OleFileIO(io.BytesIO(data)) as ole:
+                names = {"/".join(entry) for entry in ole.listdir()}
     except OSError:
         return None
     if "WordDocument" in names:
@@ -169,17 +190,41 @@ def redact_text(data, suffix, rules):
     return transform(text, rules).encode()
 
 
+NOT_PROCESSED = "NEZPRACOVANO.txt"
+
+
+def copy_limited(stream, target, limit=ARCHIVE_BYTES, block=1 << 20):
+    """Copy a stream block by block and refuse it as soon as it exceeds the limit."""
+    size = 0
+    with open(target, "wb") as out:
+        while chunk := stream.read(block):
+            size += len(chunk)
+            if size > limit:
+                raise FormatError("size_limit", "Položka archivu překračuje limit velikosti.")
+            out.write(chunk)
+    return size
+
+
 def redact_archive(source, target, rules, tessdata=None, depth=0, budget=None):
     """Redact every supported member of a ZIP archive into a new archive.
 
     ``source`` and ``target`` are paths or binary file objects; members are read
     one at a time, so the archive is never held in memory as a whole.
+
+    A member that is refused (redaction error, unsupported, encrypted or too
+    large) is left out of the output in every form; the others carry on. The
+    output then holds ``NEZPRACOVANO.txt`` with item numbers and codes only.
+    Returns the list of ``(order, code)`` of the left out members (those of
+    nested archives carry the order of the nested archive). The limits of the
+    archive and an unreadable archive still stop the whole archive.
     """
     if budget is None:
         budget = [ARCHIVE_UNPACKED, ARCHIVE_MEMBERS]
     if depth >= 3:
         raise FormatError("archive_depth", "Archiv překročil limit vnoření.")
+    skipped = []
     with ZipFile(source) as archive, ZipFile(target, "w", ZIP_DEFLATED) as output:
+        order = 0
         for entry in archive.infolist():
             budget[0] -= entry.file_size
             budget[1] -= 1
@@ -187,24 +232,52 @@ def redact_archive(source, target, rules, tessdata=None, depth=0, budget=None):
                 raise FormatError("archive_limit", "Archiv překročil limit rozbalení.")
             if entry.is_dir():
                 continue
-            if entry.flag_bits & 1:
-                raise FormatError("archive_encrypted", "Archiv obsahuje zašifrovaný soubor.")
-            if entry.file_size > ARCHIVE_BYTES:
-                raise FormatError("size_limit", "Položka archivu překračuje limit velikosti.")
-            payload = archive.read(entry)
-            suffix = identify(payload, Path(entry.filename).suffix.lower())
-            if suffix == ".zip":
-                cleaned = io.BytesIO()
-                redact_archive(io.BytesIO(payload), cleaned, rules, tessdata, depth + 1, budget)
-                cleaned, released = cleaned.getvalue(), ".zip"
-            elif suffix not in SUPPORTED:
-                raise FormatError("archive_member_unsupported", "Archiv obsahuje nepodporovanou položku.")
-            elif len(payload) > size_limit(suffix):
-                raise FormatError("size_limit", "Položka archivu překračuje limit velikosti.")
-            else:
-                cleaned, released = redact_bytes(payload, suffix, rules, tessdata)
-            output.writestr(f"polozka-{len(output.filelist) + 1:04d}{released}", cleaned)
-            del payload, cleaned
+            order += 1
+            # The member never sits in memory as a whole: it is streamed (with the size limit) into a
+            # private temporary file and processed from its path.
+            with tempfile.TemporaryDirectory(prefix="SpisRedakt-member-") as folder:
+                try:
+                    if entry.flag_bits & 1:
+                        raise FormatError("archive_encrypted", "Archiv obsahuje zašifrovaný soubor.")
+                    if entry.file_size > ARCHIVE_BYTES:
+                        raise FormatError("size_limit", "Položka archivu překračuje limit velikosti.")
+                    staged = Path(folder) / "input"
+                    with archive.open(entry) as stream:
+                        copy_limited(stream, staged)
+                    suffix = identify(staged, Path(entry.filename).suffix.lower())
+                    if suffix == ".zip":
+                        released = ".zip"
+                        cleaned = Path(folder) / "output.zip"
+                        skipped.extend((order, code) for _, code in
+                                       redact_archive(staged, cleaned, rules, tessdata, depth + 1, budget))
+                    elif suffix not in SUPPORTED:
+                        raise FormatError("archive_member_unsupported", "Archiv obsahuje nepodporovanou položku.")
+                    elif staged.stat().st_size > size_limit(suffix):
+                        raise FormatError("size_limit", "Položka archivu překračuje limit velikosti.")
+                    else:
+                        staged = staged.rename(staged.with_name("input" + suffix))
+                        released = output_suffix(suffix)
+                        cleaned = Path(folder) / ("output" + released)
+                        if redact_file(staged, cleaned, suffix, rules, tessdata):
+                            # A member is never released with parts missing.
+                            raise FormatError("attachment_unsupported",
+                                              "E-mail nebo archiv obsahuje položku v nepodporovaném formátu.")
+                except FormatError as error:
+                    if error.code == "archive_limit":
+                        raise
+                    skipped.append((order, error.code))
+                    continue
+                except Exception as error:
+                    code = reason_code(error)
+                    skipped.append((order, "processing_error" if code == "other" else code))
+                    continue
+                # The member is complete and checked; only now does it enter the output.
+                output.write(cleaned, f"polozka-{order:04d}{released}")
+        if skipped:
+            output.writestr(NOT_PROCESSED, "Tyto položky archivu nebyly zpracovány a ve výstupu nejsou "
+                            "(uvedeno je jen pořadí a kód důvodu):\n"
+                            + "".join(f"Položka {item}: {code}\n" for item, code in skipped))
+    return skipped
 
 
 def redact_scan(source, destination, rules, tessdata):
@@ -261,8 +334,9 @@ def redact_file(source, destination, suffix, rules, tessdata):
             if archive.testzip() is not None:
                 raise FormatError("corrupt_output", "Výstup Office nelze přečíst.")
     else:
+        skipped = []
         if suffix == ".zip":
-            redact_archive(source, destination, rules, tessdata)
+            skipped = redact_archive(source, destination, rules, tessdata)
         else:
             data = source.read_bytes()
             if suffix in TEXT:
@@ -278,6 +352,7 @@ def redact_file(source, destination, suffix, rules, tessdata):
             with ZipFile(destination) as archive:
                 if archive.testzip() is not None:
                     raise FormatError("corrupt_output", "Výstupní archiv nelze přečíst.")
+        return skipped
 
 
 def redact_bytes(data, suffix, rules, tessdata, depth=0):
@@ -291,5 +366,7 @@ def redact_bytes(data, suffix, rules, tessdata, depth=0):
         source = Path(folder) / ("input" + detected)
         target = Path(folder) / ("output" + output_suffix(detected))
         source.write_bytes(data)
-        redact_file(source, target, detected, rules, tessdata)
+        if redact_file(source, target, detected, rules, tessdata):
+            # An e-mail attachment or nested member is never released with parts missing.
+            raise FormatError("attachment_unsupported", "E-mail nebo archiv obsahuje položku v nepodporovaném formátu.")
         return target.read_bytes(), output_suffix(detected)

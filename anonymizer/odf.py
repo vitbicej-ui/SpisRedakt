@@ -5,11 +5,13 @@ from zipfile import ZIP_STORED, ZipFile
 from lxml import etree
 
 from .czech import plan_table
+from .office import remove_node
 
 NS = {
     "text": "urn:oasis:names:tc:opendocument:xmlns:text:1.0",
     "table": "urn:oasis:names:tc:opendocument:xmlns:table:1.0",
     "office": "urn:oasis:names:tc:opendocument:xmlns:office:1.0",
+    "style": "urn:oasis:names:tc:opendocument:xmlns:style:1.0",
     "xlink": "http://www.w3.org/1999/xlink",
     "manifest": "urn:oasis:names:tc:opendocument:xmlns:manifest:1.0",
     "calcext": "urn:org:documentfoundation:names:experimental:calc:xmlns:calcext:1.0",
@@ -27,10 +29,12 @@ SPACES = {TEXT + "s": " ", TEXT + "tab": " ", TEXT + "line-break": " "}
 NESTED = {TEXT + "note", OFFICE + "annotation"}
 UNSUPPORTED = re.compile(r"^(?:Object|Basic|Scripts)|^META-INF/.*signature", re.I)
 # User-interface settings and previews that are not needed in the output.
-SKIPPED = ("Thumbnails/", "Configurations2/")
+SKIPPED = ("Thumbnails/", "Configurations2/", "settings.xml")
 IMAGE = re.compile(r"^Pictures/[^/]+\.(png|jpe?g)$", re.I)
-META_PRIVATE = {"creator", "initial-creator", "title", "subject", "description", "keyword",
-                "user-defined", "printed-by", "template"}
+# The metadata of a document names authors, files and dates; the output keeps only these elements.
+META_KEPT = {"language", "document-statistic"}
+STYLE = "{%s}" % NS["style"]
+HIDDEN_VALUES = {"none", "condition"}
 DISABLED_LINK = "https://example.invalid/"
 VALUE_ATTRIBUTES = [f"{{{NS[prefix]}}}{name}" for prefix in ("office", "calcext") for name in
                     ("value", "date-value", "time-value", "boolean-value", "string-value", "value-type")]
@@ -168,7 +172,8 @@ def label_cell(cell, paragraphs, kind, text, rules):
 def redact_tables(root, rules):
     for table in root.iter(TABLE + "table"):
         rows = list(table_rows(table))
-        plan = plan_table([[(column, text) for column, _, text, _ in cells] for cells in rows])
+        plan = plan_table([[(column, "\n".join(block_text(node) for node in paragraphs))
+                            for column, _, _, paragraphs in cells] for cells in rows])
         for (index, position), kind in plan.items():
             _, cell, text, paragraphs = rows[index][position]
             if paragraphs:
@@ -189,7 +194,50 @@ def check(root, rules):
             raise ValueError("Ve výstupu zůstal detekovatelný text.")
 
 
-def redact_xml(root, rules):
+def hidden_styles(roots):
+    """Names of styles that hide text (directly or through their parent style)."""
+    parents, hidden = {}, set()
+    for root in roots:
+        for style in root.iter(STYLE + "style"):
+            name = style.get(STYLE + "name")
+            parents[name] = style.get(STYLE + "parent-style-name")
+            for properties in style.iter(STYLE + "text-properties"):
+                if properties.get(TEXT + "display") in HIDDEN_VALUES:
+                    hidden.add(name)
+    changed = True
+    while changed:
+        changed = False
+        for name, parent in parents.items():
+            if parent in hidden and name not in hidden:
+                hidden.add(name)
+                changed = True
+    return hidden
+
+
+def strip_layers(root, hidden):
+    """Accept tracked changes, drop comments and hidden text before anything is redacted."""
+    gone = {TEXT + "tracked-changes", TEXT + "change", TEXT + "change-start", TEXT + "change-end",
+            TEXT + "hidden-text", TEXT + "hidden-paragraph", OFFICE + "annotation", OFFICE + "annotation-end"}
+    for node in list(root.iter()):
+        if not isinstance(node.tag, str) or node.getparent() is None:
+            continue
+        name = node.tag
+        local = etree.QName(node).localname
+        concealed = (name in gone or "annotation" in local
+                     or name == TEXT + "section" and node.get(TEXT + "display") in HIDDEN_VALUES
+                     or name in {TEXT + "span", TEXT + "p", TEXT + "h", TEXT + "list", TEXT + "a"}
+                     and (node.get(TEXT + "style-name") in hidden or node.get(TEXT + "cond-style-name") in hidden))
+        if concealed:
+            remove_node(node)
+        elif local in {"user-field-decl", "variable-decl", "variable-set", "user-field-get", "variable-get"}:
+            # The declared value repeats what the field shows and is otherwise invisible.
+            for attribute in VALUE_ATTRIBUTES:
+                if not attribute.endswith("value-type"):
+                    node.attrib.pop(attribute, None)
+
+
+def redact_xml(root, rules, hidden=frozenset()):
+    strip_layers(root, hidden)
     href = f"{{{NS['xlink']}}}href"
     for node in root.iter():
         if not isinstance(node.tag, str):
@@ -201,14 +249,6 @@ def redact_xml(root, rules):
                 node.set(href, DISABLED_LINK)
             elif re.match(r"[a-z][a-z0-9+.-]*:", target, re.I):
                 raise ValueError("Dokument načítá externí obrázek nebo data. Vložte je přímo do dokumentu.")
-        if local == "annotation":
-            for child in list(node):
-                if etree.QName(child).localname in {"creator", "date", "initials"}:
-                    child.text = ""
-        if local == "changed-region":
-            for child in node.iter():
-                if etree.QName(child).localname in {"creator", "date"}:
-                    child.text = ""
     redact_tables(root, rules)
     for block in list(root.iter(*BLOCKS)):
         redact_block(block, rules)
@@ -224,6 +264,8 @@ def redact_odf(source, destination, rules, tessdata=None, redact_image=None):
             raise ValueError("Dokument OpenDocument je poškozený nebo příliš velký.")
         if any(UNSUPPORTED.match(name) for name in names):
             raise ValueError("Dokument obsahuje vložené objekty nebo makra. Odstraňte je před zpracováním.")
+        hidden = hidden_styles([etree.fromstring(original.read(part), etree.XMLParser(resolve_entities=False, no_network=True))
+                                for part in ("content.xml", "styles.xml") if part in names])
         for entry in original.infolist():
             name = entry.filename
             if name.startswith(SKIPPED) or entry.is_dir():
@@ -250,12 +292,13 @@ def redact_odf(source, destination, rules, tessdata=None, redact_image=None):
                         if any(etree.QName(child).localname == "encryption-data" for child in node):
                             raise ValueError("Dokument je zašifrovaný.")
                 elif name == "meta.xml":
-                    for node in list(root.iter()):
-                        if isinstance(node.tag, str) and etree.QName(node).localname in META_PRIVATE:
-                            node.getparent().remove(node)
+                    for meta in root.iter(OFFICE + "meta"):
+                        for node in list(meta):
+                            if not isinstance(node.tag, str) or etree.QName(node).localname not in META_KEPT:
+                                meta.remove(node)
                     check(root, rules)
                 else:
-                    redact_xml(root, rules)
+                    redact_xml(root, rules, hidden)
                 data = etree.tostring(root, encoding="UTF-8", xml_declaration=True)
             elif name.startswith("META-INF/") or name.endswith(".rdf"):
                 pass

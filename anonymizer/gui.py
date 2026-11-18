@@ -3,23 +3,62 @@ import sys
 import tempfile
 import os
 import hashlib
+import time
 
 from PySide6.QtCore import QSettings, QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
 from .batch import process_folders
+from .reasons import ADVICE, GENERAL_ADVICE, advice
+
+
+PROGRESS_INTERVAL = 0.25
+REMINDER = ("Před nahráním zkontrolujte nezpracované položky a namátkou porovnejte výstup s originálem.")
+
+
+def number(value):
+    return f"{value:,}".replace(",", " ")
 
 
 class BatchWorker(QThread):
     result = Signal(str)
     handled = Signal(str)
+    progress = Signal(int, int)
 
-    def __init__(self, source, output, tessdata, parent, selected):
+    def __init__(self, source, output, tessdata, parent, selected, copies=True, split=False):
         super().__init__(parent)
         self.arguments = source, output, tessdata
         self.selected = selected
+        self.copies = copies
+        self.split = split
+        self.last_progress = 0.0
+
+    def report_progress(self, items, pages):
+        # The batch runs in this thread; the interface is updated at most a few times per second.
+        now = time.monotonic()
+        if now - self.last_progress >= PROGRESS_INTERVAL:
+            self.last_progress = now
+            self.progress.emit(items, pages)
+
+    def report_summary(self, summary):
+        """Describe the Markdown result; only counts, codes and fixed advice, never document content."""
+        output_root = Path(self.arguments[1]).resolve()
+        if summary["error"]:
+            self.result.emit(f"Markdown nebyl vydán. Chyba: {summary['error']}")
+            self.result.emit(f"    Rada: {advice(summary['error'])}")
+        elif summary["markdown"]:
+            self.result.emit(f"Markdown: {Path(summary['markdown']).relative_to(output_root)}")
+        self.result.emit(f"Dokumentů ve spisu: {number(summary['documents'])}")
+        if summary["tokens_after"]:
+            self.result.emit(f"Odhad tokenů: {number(summary['tokens_after'])} "
+                             f"(před úpravami {number(summary['tokens_before'])})")
+        skipped = summary["skipped"]
+        self.result.emit(f"Nezpracovaných položek: {len(skipped)}")
+        for order, code in skipped:
+            self.result.emit(f"    Položka {order}: {ADVICE.get(code, GENERAL_ADVICE)}")
+        self.result.emit(REMINDER)
 
     def run(self):
         try:
@@ -29,15 +68,22 @@ class BatchWorker(QThread):
                 self.result.emit(f"{prefix}: {path}")
             remaining = set(self.selected)
             for source, target, error in process_folders(
-                *self.arguments, audit_root=audit_root, audit_ready=audit_ready, selected=self.selected
+                *self.arguments, audit_root=audit_root, audit_ready=audit_ready, selected=self.selected,
+                markdown=True, copies=self.copies, split=self.split,
+                progress=self.report_progress, summary=self.report_summary,
             ):
+                if source is None:
+                    continue
                 source_root, output_root, _ = self.arguments
                 message = str(target.relative_to(Path(output_root).resolve())) if target else f"Chyba: {error}"
                 self.result.emit(f"{source.relative_to(Path(source_root).resolve())} → {message}")
+                if not target:
+                    self.result.emit(f"    Rada: {advice(error)}")
                 remaining.discard(source)
                 self.handled.emit(str(source))
             for source in sorted(remaining):
-                self.result.emit(f"{source.name} → přeskočeno")
+                if self.copies:
+                    self.result.emit(f"{source.name} → přeskočeno")
                 self.handled.emit(str(source))
         except ValueError as error:
             self.result.emit(str(error))
@@ -92,6 +138,15 @@ class Window(QWidget):
             row.addWidget(button)
             layout.addLayout(row)
             self.buttons.append(button)
+        self.options = {}
+        for key, title in (("copies", "Vytvořit také anonymizovaný ZIP pro kontrolu"),
+                           ("split", "Rozdělit po dokumentech")):
+            box = QCheckBox(title)
+            box.setChecked(self.settings.value(key, False, bool))
+            box.toggled.connect(lambda checked, name=key: self.save_option(name, checked))
+            self.options[key] = box
+            self.buttons.append(box)
+            layout.addWidget(box)
         self.status = QLabel()
         self.status.setObjectName("status")
         self.status.setWordWrap(True)
@@ -107,6 +162,13 @@ class Window(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.scan)
         self.timer.start(2500)
+
+    def save_option(self, key, checked):
+        self.settings.setValue(key, bool(checked))
+        self.settings.sync()
+
+    def show_progress(self, items, pages):
+        self.status.setText(f"Zpracováno položek: {number(items)}, stran: {number(pages)}")
 
     def refresh_paths(self):
         for key, name in (("source", "Vstup"), ("output", "Výstup")):
@@ -161,7 +223,10 @@ class Window(QWidget):
         for button in self.buttons:
             button.setEnabled(False)
         self.status.setText(f"Zpracovávám soubory: {len(pending)}")
-        self.worker = BatchWorker(str(source), str(output), self.tessdata, self, list(pending))
+        self.worker = BatchWorker(str(source), str(output), self.tessdata, self, list(pending),
+                                   copies=self.options["copies"].isChecked(),
+                                   split=self.options["split"].isChecked())
+        self.worker.progress.connect(self.show_progress)
         self.worker.result.connect(self.log.appendPlainText)
         self.worker.handled.connect(self.mark_handled)
         self.worker.finished.connect(self.finished)

@@ -8,10 +8,20 @@ pictures are redacted like other images and unknown objects stop processing.
 """
 import re
 
+from .czech import plan_table
+
 TOKEN = re.compile(rb"\\([a-zA-Z]{1,32})(-?\d{1,10})? ?|\\'([0-9a-fA-F]{2})|\\([^a-zA-Z])|([{}])|(\r\n|\r|\n)|([^\\{}\r\n]+)")
 DISABLED_LINK = "https://example.invalid/"
 # Destinations removed from the output entirely.
 DROP = {"info", "userprops", "nonshppict", "atnid", "atnauthor", "docvar", "passwordhash", "password"}
+# Dropped only from the anonymized copy (the text extraction for Markdown reads these destinations as before).
+COPY_DROP = DROP | {"template", "revtbl", "annotation", "atrfstart", "atrfend", "atnparent", "atndate", "atntime",
+                    "atnref", "atnicn", "atnbookmark", "company", "manager", "operator", "author", "title",
+                    "subject", "keywords", "doccomm", "category", "hlinkbase", "creatim", "revtim", "printim",
+                    "buptim"}
+# In the copy, revision marks (reviewer, time) go and text that was deleted or is hidden is not released.
+REVISION_WORDS = {"revauth", "revauthdel", "revdttm", "revdttmdel", "crauth", "crdate", "pnrauth", "pnrdate",
+                  "trauth", "trdate", "tcelld", "cellins", "celldel", "cellmerge", "insrsid", "delrsid"}
 # Destinations whose text is visible to readers.
 VISIBLE = {"annotation", "footnote", "header", "headerl", "headerr", "headerf", "footer", "footerl",
            "footerr", "footerf", "fldrslt", "shptxt", "pntext", "pntxta", "pntxtb"}
@@ -24,6 +34,67 @@ NONTEXT = {"fonttbl", "colortbl", "stylesheet", "listtable", "listoverridetable"
 BREAKS = {"par", "cell", "row", "sect", "page", "nestcell", "nestrow"}
 SPACES = {"line": " ", "tab": " ", "emdash": "—", "endash": "–", "lquote": "‘", "rquote": "’",
           "ldblquote": "“", "rdblquote": "”", "bullet": "•", "~": "\u00a0"}
+
+
+class Tables:
+    """Table structure seen while walking: cells are lists of blocks.
+
+    The state is shared by all groups, because ``\\cell`` is often written
+    inside braces. Content that cannot be assigned reliably to a cell is left
+    to the text rules.
+    """
+
+    def __init__(self):
+        self.tables, self.rows, self.row, self.cell = [], [], [], []
+        self.edges, self.keys = [], []
+        self.intbl = self.in_row = False
+        self.itap, self.tainted, self.pending = 1, False, None
+
+    def active(self):
+        return self.intbl or self.in_row
+
+    def close(self):
+        if self.rows and not self.tainted:
+            self.tables.append((self.rows, self.keys))
+        self.rows, self.row, self.cell, self.tainted = [], [], [], False
+        self.keys = []
+
+    def note(self, block):
+        if not self.active():
+            self.close()
+        elif not self.cell or self.cell[-1] is not block:
+            self.cell.append(block)
+
+    def word(self, name):
+        if name == "pard":
+            self.intbl, self.itap = False, 1
+        elif name == "intbl":
+            self.intbl = True
+        elif name == "trowd":
+            self.in_row = True
+            self.edges = []
+        elif name == "cellx":
+            self.edges.append(self.pending)
+        elif name == "par":
+            if not self.active():
+                self.close()
+        elif name in ("cell", "row"):
+            if self.itap > 1:
+                self.tainted = True
+            self.itap = 1
+            if name == "cell":
+                self.row.append(self.cell)
+                self.cell = []
+            else:
+                self.rows.append(self.row)
+                self.keys.append((len(self.row), tuple(self.edges)))
+                self.row, self.cell = [], []
+                self.in_row = self.intbl = False
+
+    def param(self, name, value):
+        self.pending = value
+        if name == "itap" and value is not None:
+            self.itap = value
 
 
 class Token:
@@ -116,10 +187,10 @@ def codepage(document):
     return "cp1252"
 
 
-def walk(group, state, blocks, checked, pictures):
+def walk(group, state, blocks, checked, pictures, removed=None):
     """Collect visible characters into blocks of [(char, token, offset)]."""
     name, starred = group.destination()
-    if name in DROP:
+    if name in (DROP if removed is None else COPY_DROP):
         group.dropped = True
         return
     if name == "object":
@@ -128,6 +199,8 @@ def walk(group, state, blocks, checked, pictures):
         pictures.append(group)
         return
     state = dict(state)
+    if name == "nesttableprops":
+        state["nest"] = True
     if name in VISIBLE:
         state["visible"] = True
         blocks.append([])
@@ -138,16 +211,22 @@ def walk(group, state, blocks, checked, pictures):
         checked.append((name, state["target"]))
 
     def emit(char, token, offset=None):
-        if state["target"] is not None:
+        if state.get("gone"):
+            removed.append((token, offset))
+        elif state["target"] is not None:
             state["target"].append((char, token, offset))
         elif state["visible"]:
+            state["tables"].note(blocks[-1])
             blocks[-1].append((char, token, offset))
 
     pending, owner = 0, None
     for child in group.children:
         if isinstance(child, Group):
-            walk(child, state, blocks, checked, pictures)
+            walk(child, state, blocks, checked, pictures, removed)
             continue
+        if child.kind == "word" and not state.get("nest"):
+            state["tables"].param(child.name, child.param)
+            state["tables"].word(child.name)
         if child.kind == "text":
             for offset, byte in enumerate(child.raw):
                 if pending:
@@ -163,6 +242,11 @@ def walk(group, state, blocks, checked, pictures):
         pending = 0
         char = None
         if child.kind == "word":
+            if removed is not None and child.name in {"deleted", "v"}:
+                state[child.name] = child.param != 0
+                state["gone"] = state.get("deleted") or state.get("v")
+            elif removed is not None and child.name == "plain":
+                state["deleted"] = state["v"] = state["gone"] = False
             if child.name == "uc" and child.param is not None:
                 state["uc"] = child.param
             elif child.name == "u" and child.param is not None:
@@ -195,7 +279,8 @@ def redact_pictures(pictures, rules, tessdata, redact_image):
         data = bytes.fromhex(b"".join(token.raw for token in hex_tokens).decode("ascii", "replace"))
         redacted = redact_image(data, "png" if kind == "png" else "jpg", rules, tessdata).hex().encode()
         for index, token in enumerate(hex_tokens):
-            token.raw = b"\n".join(redacted[i:i + 128] for i in range(0, len(redacted), 128)) if index == 0 else b""
+            token.raw = b"\n" + b"\n".join(redacted[i:i + 128] for i in range(0, len(redacted), 128)) if index == 0 else b""
+        # A line break delimits the last control word (a digit of the picture size must not join the data).
         group.children = [child for child in group.children if not (isinstance(child, Token) and child.kind == "newline")]
 
 
@@ -209,19 +294,63 @@ def set_text(token, offset, value):
         set_text(fallback, position, "")
 
 
-def collect(document):
-    blocks, checked, pictures = [[]], [], []
-    walk(document, {"visible": True, "uc": 1, "codepage": codepage(document), "target": None},
-         blocks, checked, pictures)
-    return blocks, checked, pictures
+def collect(document, copy=False):
+    """Walk the document; with ``copy`` also return the removed characters (for the anonymized copy)."""
+    blocks, checked, pictures, tables, removed = [[]], [], [], Tables(), [] if copy else None
+    walk(document, {"visible": True, "uc": 1, "codepage": codepage(document), "target": None,
+                    "tables": tables}, blocks, checked, pictures, removed)
+    tables.close()
+    if copy:
+        return blocks, checked, pictures, tables.tables, removed
+    return blocks, checked, pictures, tables.tables
+
+
+def neutralise(group):
+    """Replace revision marks by an empty group (a bare removal could glue the next word to a control word)."""
+    for child in group.children:
+        if isinstance(child, Group):
+            neutralise(child)
+        elif child.kind == "word" and child.name in REVISION_WORDS:
+            child.raw, child.edits = b"{}", {}
 
 
 def redact_rtf(data, rules, tessdata=None, redact_image=None):
     document = parse(data)
-    blocks, checked, pictures = collect(document)
+    blocks, checked, pictures, tables, removed = collect(document, copy=True)
+    for token, offset in removed:
+        set_text(token, offset, "")
+    neutralise(document)
     if pictures:
         redact_pictures(pictures, rules, tessdata, redact_image)
+    labelled = set()
+    for rows, keys in tables:
+        texts = [[" ".join(t for t in ("".join(char for char, _, _ in block).strip() for block in cell) if t)
+                  for cell in row] for row in rows]
+        lines = [[("\n".join(t for t in ("".join(char for char, _, _ in block).strip() for block in cell) if t))
+                  for cell in row] for row in rows]
+        plan = plan_table([list(enumerate(row)) for row in lines])
+        # Rows of different shape may be separate tables written back to back:
+        # a cell is labelled when the whole table or any such section marks it.
+        start = 0
+        for end in range(1, len(rows) + 1):
+            if end == len(rows) or keys[end] != keys[start]:
+                if (start, end) != (0, len(rows)):
+                    part = plan_table([list(enumerate(row)) for row in lines[start:end]])
+                    for (index, position), kind in part.items():
+                        plan.setdefault((start + index, position), kind)
+                start = end
+        for (index, position), kind in plan.items():
+            cell = rows[index][position]
+            label = rules.cell(kind, texts[index][position])
+            if not label:
+                continue
+            chars = [item for block in cell for item in block]
+            for number, (_, token, offset) in enumerate(chars):
+                set_text(token, offset, label if number == 0 else "")
+            labelled.update(id(block) for block in cell)
     for block in blocks:
+        if id(block) in labelled:
+            continue
         text = "".join(char for char, _, _ in block)
         for match in reversed(rules.find(text)):
             label = rules.label(match)
@@ -237,7 +366,7 @@ def redact_rtf(data, rules, tessdata=None, redact_image=None):
             raise ValueError("Citlivý údaj je ve skryté části RTF (pole, záložka nebo rejstřík).")
     output = document.raw()
     # Re-read the result: nothing the rules recognise may remain visible.
-    blocks, checked, _ = collect(parse(output))
+    blocks, checked, _, _, _ = collect(parse(output), copy=True)
     for block in blocks + [items for _, items in checked]:
         if rules.find("".join(char for char, _, _ in block)):
             raise ValueError("Kontrola výstupu RTF našla zbývající údaj.")

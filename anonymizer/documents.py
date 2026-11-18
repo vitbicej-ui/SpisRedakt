@@ -93,6 +93,27 @@ def text_geometry(raw):
     return "".join(text), boxes
 
 
+def is_plain_rgb(pixmap):
+    # Colorspace objects are compared by identity, so ``pixmap.colorspace == pdf.csRGB`` is always false.
+    return pixmap.n == 3 and not pixmap.alpha and pixmap.colorspace is not None and pixmap.colorspace.name == "DeviceRGB"
+
+
+def fill_black(pixmap, area):
+    """Fill ``area`` (an IRect inside the pixmap) with black; same result as ``pixmap.set_rect(area, (0, 0, 0))``.
+
+    PyMuPDF fills a rectangle pixel by pixel in Python, which dominates the processing of a page, so an
+    RGB pixmap without alpha is filled row by row instead.
+    """
+    if not is_plain_rgb(pixmap):
+        return pixmap.set_rect(area, (0, 0, 0))
+    view, width = pixmap.samples_mv, (area.x1 - area.x0) * 3
+    black = bytes(width)
+    for row in range(area.y0, area.y1):
+        start = row * pixmap.stride + area.x0 * 3
+        view[start:start + width] = black
+    return True
+
+
 def blackout(pixmap, rectangle, matrix):
     pixel_rect = (rectangle * matrix).irect
     pixel_rect.x0 -= 2
@@ -100,16 +121,46 @@ def blackout(pixmap, rectangle, matrix):
     pixel_rect.x1 += 2
     pixel_rect.y1 += 2
     pixel_rect &= pixmap.irect
-    if pixel_rect.is_empty or not pixmap.set_rect(pixel_rect, (0, 0, 0)):
+    if pixel_rect.is_empty or not fill_black(pixmap, pixel_rect):
         raise ValueError("Oblast redakce je mimo obraz stránky.")
     return pixel_rect
 
 
-def redact_geometry(pixmap, rules, text, geometry, transform):
+HYPHEN_BREAK = re.compile(r"-\n(?=[a-z\u00e1-\u017e])")
+
+
+def joined_view(text):
+    """Text with words joined across hyphenated line ends and other line breaks turned into spaces.
+
+    Returns the view and, for each of its characters, the index in ``text`` (a removed hyphen and
+    line break lie between the indexes of its neighbours), so a finding can be placed on the boxes.
+    """
+    pieces, indexes, position = [], [], 0
+    for match in HYPHEN_BREAK.finditer(text):
+        pieces.append(text[position:match.start()])
+        indexes.extend(range(position, match.start()))
+        position = match.end()
+    pieces.append(text[position:])
+    indexes.extend(range(position, len(text)))
+    view = "".join(pieces).replace("\n", " ")
+    return view, indexes
+
+
+def redact_geometry(pixmap, rules, text, geometry, transform, ocr=False):
     redacted = []
-    for item in rules.find(text):
+    spans = [(item.start, item.end) for item in rules.find(text, ocr=ocr)]
+    if "\n" in text:
+        # A name split by a hyphen at a line end, or a value that continues on the next line, is invisible
+        # to a search line by line: look again at the joined text and black out the boxes of every part.
+        view, indexes = joined_view(text)
+        spans += [(indexes[item.start], indexes[item.end - 1] + 1) for item in rules.find(view, ocr=ocr)]
+    covered = set()
+    for start, end in sorted(spans):
+        if (start, end) in covered:
+            continue
+        covered.add((start, end))
         lines = {}
-        for entry in geometry[item.start:item.end]:
+        for entry in geometry[start:end]:
             if entry is not None:
                 line_id, bbox = entry
                 lines[line_id] = lines.get(line_id, pdf.Rect()) | bbox
@@ -119,9 +170,30 @@ def redact_geometry(pixmap, rules, text, geometry, transform):
     return redacted
 
 
+def ocr_pixmap(pixmap):
+    """RGB pixmap without alpha for OCR: PyMuPDF does not read gray, indexed or transparent pixmaps.
+
+    Transparent pixels are laid on white (they would turn black); the size stays the same, so boxes
+    found on the copy fit the original pixmap.
+    """
+    if is_plain_rgb(pixmap):
+        return pixmap
+    if pixmap.colorspace is None:
+        raise ValueError("Vložený obrázek nelze vykreslit.")
+    if pixmap.alpha:
+        with pdf.open() as sheet:
+            page = sheet.new_page(width=pixmap.width, height=pixmap.height)
+            page.insert_image(page.rect, pixmap=pixmap)
+            pixmap = page.get_pixmap(dpi=72, colorspace=pdf.csRGB, alpha=False)
+    if pixmap.colorspace != pdf.csRGB:
+        pixmap = pdf.Pixmap(pdf.csRGB, pixmap)
+    return pixmap
+
+
 def recognize_image(pixmap, tessdata):
     if tessdata is None or not (Path(tessdata) / "ces.traineddata").is_file():
         raise ValueError("Obraz vyžaduje česká data OCR (ces.traineddata).")
+    pixmap = ocr_pixmap(pixmap)
     with pdf.open("pdf", pixmap.pdfocr_tobytes(language="ces", tessdata=ocr_path(tessdata))) as recognized:
         page = recognized[0]
         text, boxes = text_geometry(page.get_text("rawdict", flags=pdf.TEXTFLAGS_RAWDICT & ~pdf.TEXT_PRESERVE_IMAGES))
@@ -134,6 +206,13 @@ def blank(page):
     preview = page.get_pixmap(dpi=40, colorspace=pdf.csGRAY, annots=False, alpha=False)
     dark = sum(1 for value in preview.samples if value < 160)
     return dark <= 0.002 * preview.width * preview.height
+
+
+def slovak_register(text):
+    """True for text that looks like a Slovak criminal-record extract or form (never released)."""
+    folded = "".join(c for c in unicodedata.normalize("NFD", text.casefold()) if not unicodedata.combining(c))
+    return bool(re.search(r"regist(?:er|r[aeiu]?)\s+trestov", folded)
+                or ("priezvisko" in folded and re.search(r"narodenia|ziadatel", folded)))
 
 
 def redact_pdf(source, destination, rules, tessdata=None, force_ocr=False):
@@ -153,26 +232,22 @@ def redact_pdf(source, destination, rules, tessdata=None, force_ocr=False):
             raw = page.get_text("rawdict", flags=pdf.TEXTFLAGS_RAWDICT & ~pdf.TEXT_PRESERVE_IMAGES)
             text, boxes = text_geometry(raw)
             matrix = page.rotation_matrix * scale
-            sources = [(text, boxes, matrix)]
+            sources = [(text, boxes, matrix, False)]
             blacked = False
             if force_ocr or page.get_image_info() or page.get_drawings() or not text.strip() or "\ufffd" in text:
                 recognized = recognize_image(pixmap, tessdata)
                 if recognized[0].strip():
-                    sources.append(recognized)
+                    sources.append((*recognized, True))
                 elif not text.strip() and not blank(page):
                     # A photo, signature or unreadable scan: OCR cannot rule out
                     # personal data, so the whole page is blacked out.
                     pixmap.clear_with(0)
                     blacked = True
-            combined = " ".join(content for content, _, _ in sources)
-            folded = "".join(c for c in unicodedata.normalize("NFD", combined.casefold())
-                             if not unicodedata.combining(c))
-            if (re.search(r"regist(?:er|r[aeiu]?)\s+trestov", folded)
-                    or ("priezvisko" in folded and re.search(r"narodenia|ziadatel", folded))):
+            if slovak_register(" ".join(source[0] for source in sources)):
                 raise ValueError("Slovenský výpis nebo formulář nebyl vydán: rozložení osobních polí zatím nelze spolehlivě ověřit.")
             redacted = [pixmap.irect] if blacked else []
-            for content, geometry, transform in sources:
-                redacted.extend(redact_geometry(pixmap, rules, content, geometry, transform))
+            for content, geometry, transform, ocr in sources:
+                redacted.extend(redact_geometry(pixmap, rules, content, geometry, transform, ocr))
             target = output.new_page(width=page.rect.width, height=page.rect.height)
             target.insert_image(target.rect, pixmap=pixmap, keep_proportion=False)
             expected.append(redacted)

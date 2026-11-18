@@ -14,6 +14,7 @@ Jsi orchestrátor vývoje projektu SpisRedakt. Kód sám píšeš jen výjimečn
 4. Zkontroluj výsledek sám:
    - `git diff`: správnost, soukromí (žádný obsah dokumentu v hlášeních ani auditu), rozsah změny,
    - celou sadu testů včetně OCR,
+   - po pushi výsledek workflow Windows (`.github/workflows/windows.yml`) pro daný commit; aplikace běží na Windows a některé chyby se v Linuxu neprojeví. Selhání opravit dřív než další úkol,
    - README a `reasons.py` u nových hlášení.
 
    Co nevyhovuje, vrať témuž vývojáři (SendMessage) s konkrétními výhradami.

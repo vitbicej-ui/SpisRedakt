@@ -1,6 +1,8 @@
 """Contextual rules for Czech documents, with no network or model dependency."""
 import re
+import unicodedata
 from datetime import date
+from functools import lru_cache
 
 from .names import generated
 
@@ -64,6 +66,12 @@ for canonical, forms, feminine in generated():
         if canonical not in GIVEN.setdefault(form, []):
             GIVEN[form].append(canonical)
 
+# canonical given name -> every form (case) of it
+GIVEN_FORMS = {}
+for _form, _canonicals in GIVEN.items():
+    for _canonical in _canonicals:
+        GIVEN_FORMS.setdefault(_canonical, set()).add(_form)
+
 FEMININE = set("anna jana eva petra marie lucie hana alena kateřina tereza veronika lenka barbora ivana jitka martina markéta eliška kristýna".split())
 FEMININE.update(canonical for canonical, _, feminine in generated() if feminine)
 FEMININE.update("václava šárka zuzana monika simona michaela dominika".split())
@@ -80,18 +88,299 @@ def name_identity(first, last):
     return f"{canonical} {surname}"
 
 
+ADJECTIVE_SURNAME = re.compile(r"(.+?)(?:ý|á|ého|ému|ém|ým|é|ou)")
+FEMALE_SURNAME = re.compile(r"(.+ov)(?:á|é|ou|ými)")
+SURNAME_ENDING = re.compile(r"(?<=[bcčdďfghjklmnňprřsštťvzž])(?:ovi|em|a|u|e|i)$")
+SURNAME_MOBILE = re.compile(r"(?<=[bcčdďfghjklmnňprřsštťvzž])[eě](?=[kl]$)")
+
+
 def surname_stem(last, feminine):
-    adjective = re.fullmatch(r"(.+?)(?:ý|á|ého|ému|ém|ým|é|ou)", last)
-    female = re.fullmatch(r"(.+ov)(?:á|é|ou|ými)", last)
+    adjective = ADJECTIVE_SURNAME.fullmatch(last)
+    female = FEMALE_SURNAME.fullmatch(last)
     if female:
         last = female[1] + "á"
     elif adjective:
         last = adjective[1] + ("á" if feminine else "ý")
     elif not feminine:
         # Keep stems stable across the common mobile-e and mobile-ě patterns.
-        last = re.sub(r"(?<=[bcčdďfghjklmnňprřsštťvzž])(?:ovi|em|a|u|e|i)$", "", last)
-        last = re.sub(r"(?<=[bcčdďfghjklmnňprřsštťvzž])[eě](?=[kl]$)", "", last)
+        last = SURNAME_ENDING.sub("", last)
+        last = SURNAME_MOBILE.sub("", last)
     return last
+
+
+# Surname families. Every case and gender of a surname maps to one key, built
+# without diacritics so that OCR output ("Novak") meets "Novák". The key is
+# derived by cutting endings, so it is only meant for comparison.
+FAMILY_FEMALE = re.compile(r"(.{2,}?)ov(?:a|e|ou)")
+FAMILY_MALE_DATIVE = re.compile(r"(.{2,})ovi")
+FAMILY_ENDINGS = ("ymi", "ych", "eho", "emu", "em", "ym", "ou", "a", "e", "i", "o", "u", "y")
+FAMILY_MOBILE = re.compile(r"(?<=[bcdfghjklmnpqrstvwxz])e(?=[kcl]$)")
+
+
+def plain(word):
+    """Casefolded ``word`` without diacritics."""
+    return "".join(letter for letter in unicodedata.normalize("NFD", word.casefold())
+                   if not unicodedata.combining(letter))
+
+
+def family_part(word):
+    folded = word.casefold()
+    text = plain(folded)
+    female = FAMILY_FEMALE.fullmatch(text)
+    if female:
+        stem, gender = female[1], "f"
+    else:
+        gender = "f" if folded.endswith("á") else None if folded.endswith(("é", "ou")) else "m"
+        dative = FAMILY_MALE_DATIVE.fullmatch(text)
+        stem = text
+        if dative:
+            stem = dative[1]
+        elif text.endswith("ius"):
+            stem = text[:-2]
+        else:
+            for ending in FAMILY_ENDINGS:
+                if text.endswith(ending) and len(text) - len(ending) >= 3:
+                    stem = text[:-len(ending)]
+                    break
+    return FAMILY_MOBILE.sub("", stem), gender
+
+
+@lru_cache(maxsize=1 << 16)
+def surname_family(word):
+    """Return ``(key, gender)`` for a surname in any case and gender.
+
+    ``key`` is the same for Novák, Nováka, Novákovi, Nováková, Novákovou (and for
+    OCR "Novak"), for Malý, Malého, Malá, Malou, and for Hájek / Hájka (mobile e).
+    ``gender`` is "f" or "m", or None when the form does not tell ("Malé", "Malou").
+    Hyphenated surnames join the keys of their parts and take the last gender.
+    """
+    parts = [family_part(part) for part in word.split("-") if part]
+    if not parts:
+        return "", None
+    return "-".join(key for key, _ in parts), parts[-1][1]
+
+
+@lru_cache(maxsize=1 << 16)
+def family_keys(word):
+    """``surname_family`` of a word first, then of each part of a hyphenated word."""
+    first = surname_family(word)
+    if "-" not in word:
+        return (first,)
+    return (first, *dict.fromkeys(surname_family(part) for part in word.split("-") if part))
+
+
+WORD = re.compile(r"[^\W\d_]+(?:-[^\W\d_]+)*")
+# Words that start with a capital letter (Czech, other Latin letters, all caps).
+CAPITALS = UPPER + "".join(chr(code) for code in range(0xC0, 0x180) if chr(code).isupper() and chr(code) not in UPPER)
+CAP_WORD = re.compile(rf"(?<![^\W\d_])[{CAPITALS}][^\W\d_]*(?:-[^\W\d_]+)*")
+INITIAL_WORD = re.compile(r"[^\W\d_]\.")
+
+
+@lru_cache(maxsize=1 << 14)
+def identity_family(identity):
+    """Family keys and gender of a person identity such as "jan novák" or "j. novák"."""
+    tokens = [token for token in identity.split() if not INITIAL_WORD.fullmatch(token)]
+    if not tokens:
+        return (), None
+    given = None
+    if len(tokens) > 1:
+        # "Novák Jan" in a table cell: the surname is the word that is not a given name.
+        if tokens[-1] in GIVEN and tokens[0] not in GIVEN:
+            tokens.reverse()
+        given = tokens[0] if tokens[0] in GIVEN else None
+    surname = tokens[-1]
+    if not WORD.fullmatch(surname):
+        return (), None
+    keys = family_keys(surname)
+    gender = keys[0][1]
+    if gender != "f" and given:
+        gender = "f" if given in FEMININE or all(form in FEMININE for form in GIVEN[given]) else "m"
+    return keys, gender
+
+
+def surface_surname(surface):
+    """The surname as written in a found person ("Tadeáš Wolf" -> "Wolf"), or ""."""
+    tokens = [token.strip(",;:()") for token in surface.split() if not token.endswith(".")]
+    tokens = [token for token in tokens if WORD.fullmatch(token)]
+    if len(tokens) > 1 and tokens[-1].casefold() in GIVEN and tokens[0].casefold() not in GIVEN:
+        return tokens[0]
+    return tokens[-1] if tokens else ""
+
+
+# Surnames that are also common words (many adjectives). They are replaced
+# only when the context shows a person or the word does not start a sentence.
+COMMON_SURNAMES = set("""Malý Velký Černý Bílý Červený Zelený Modrý Veselý Pokorný Hrubý Tichý Suchý Rychlý
+Krátký Dlouhý Nový Starý Mladý Sladký Tvrdý Slabý Silný Chytrý Hladký Šťastný Moudrý Král Kníže Svoboda Kovář
+Mráz Zima Liška Vrána Hora Kříž Vlk Sova Holub Pták Orel Sedlák Rybář Pekař Krejčí Bureš Rada Ráda Lesk Jaro
+Léto Strnad Kos Straka Hanák""".split())
+COMMON_KEYS = frozenset(surname_family(word)[0] for word in COMMON_SURNAMES)
+
+# Capitalised words that follow a role ("žalobce Okresní soud") but are never a surname.
+NOT_SURNAME = set("""okresní krajský městský obvodní vrchní nejvyšší ústavní soud soudu soudy soudce soudkyně
+česká české český česko republika republiky slovenská slovenský hlavní státní správní finanční celní policejní
+evropský evropská evropské unie společnost společnosti firma stát státu obec město vláda ministerstvo úřad
+úřadu banka pojišťovna škola nemocnice komise rada zástupce zástupkyně advokát advokátka praha brno ostrava
+plzeň olomouc liberec""".split())
+ROLE_PREFIXES = ("dědic", "účastník", "klient", "notář", "svědk", "svědek", "žalobc", "žalobk", "žalovan",
+                 "obžalovan", "obviněn", "poškozen", "advokát", "zástupc", "manžel", "zastoupen", "podepsal")
+ROLE_NOT = ("dědictv", "manželstv", "advokátn", "zástupn", "klientsk", "poškozov")
+TITLE_WORDS = frozenset("judr mudr phdr mgr ing bc bca dr prof doc mba dis csc thdr rndr pharmdr paeddr mvdr ph".split())
+COMMON_GIVEN = frozenset("dana dany danou věra věru věry věře věrou".split())
+ROLE_ALT = (r"(?:pan(?:a|em|u|í|ovi)?(?![^\W\d_])|paní(?![^\W\d_])|pozůstalost\w*[ \t\n]+po(?![^\W\d_])|(?:"
+            + "|".join(ROLE_PREFIXES) + r")\w*)")
+ROLE_ALT_FULL = re.compile(ROLE_ALT)
+GAP = r"(?:[ \t\n]*:[ \t\n]*|[ \t\n]+)"
+TITLE_ALT = r"(?:" + "|".join(sorted(TITLE_WORDS, key=len, reverse=True)) + r")\.[ \t\n]*"
+LEFT = r"(?<![^\W\d_])"
+ROLE_AFTER = re.compile(ROLE_ALT + GAP)
+TITLE_AFTER = re.compile(TITLE_ALT)
+# A plain literal alternation is scanned fast; the exact patterns run only at its hits.
+CONTEXT_START = re.compile("(?:pan|paní|pozůstalost|" + "|".join(ROLE_PREFIXES) + "|"
+                           + "|".join(sorted(TITLE_WORDS, key=len, reverse=True)) + ")")
+ROLE_BEFORE = re.compile(LEFT + ROLE_ALT + GAP + r"\Z", re.I)
+TITLE_BEFORE = re.compile(LEFT + TITLE_ALT + r"\Z", re.I)
+INITIAL_BEFORE = re.compile(rf"{LEFT}[{UPPER}]\.[ \t\n]*\Z")
+INSTITUTION_BEFORE = re.compile(
+    r"(?:(?<!\w)soud\w*[ \t\n]+ve?|(?<!\w)(?:obec|obce|obci|obcí|městys\w*|město|města|městě|městem|ulice|ulici|ul\.|"
+    r"náměstí|nám\.))[ \t\n]+\Z", re.I)
+CAPITAL_NEXT = re.compile(rf"[ \t]+[{CAPITALS}]")
+OPENING = " \t\u00a0„“\"'(["
+
+
+def lowered(text):
+    """``text.lower()`` with the same offsets (a few letters, such as İ, change length)."""
+    low = text.lower()
+    if len(low) != len(text):
+        low = "".join(letter if len(letter.lower()) != 1 else letter.lower() for letter in text)
+    return low
+
+
+def person_before(text, start, end):
+    """Whether a word at ``start`` follows a role, a title or an initial, or precedes "nar."/"bytem"."""
+    window = text[max(0, start - 60):start]
+    for pattern in (ROLE_BEFORE, TITLE_BEFORE, INITIAL_BEFORE):
+        found = pattern.search(window)
+        if found and not (pattern is ROLE_BEFORE and found.group().casefold().startswith(ROLE_NOT)):
+            return True
+    return bool(PERSON_AFTER.match(text, end))
+
+
+def sentence_start(text, position):
+    """Whether a word starts the text, a sentence or a paragraph (a wrapped line does not)."""
+    index = position
+    while index and text[index - 1] in OPENING:
+        index -= 1
+    if not index:
+        return True
+    last = text[index - 1]
+    if last in ".!?":
+        before = text[max(0, index - 6):index - 1].rsplit(None, 1)
+        # "3. Malý" or "p. Malý": an ordinal or an abbreviation, not the end of a sentence.
+        return not (before and (before[-1].isdigit() or len(before[-1]) == 1))
+    if last == "\n":
+        end = index
+        while index and text[index - 1] in " \t\n\r":
+            index -= 1
+        if not index or text.count("\n", index, end) > 1:
+            return True
+        return text[index - 1] in ".!?"
+    return False
+
+
+# Capitalised words that may precede a surname without being a given name ("Podle Nováka", "Svědek Novák").
+BEFORE_SURNAME_NOT = frozenset("""pan paní pani slečna podle proti dle také dále potom pak když že jak kde kdy ale nebo
+již jen tedy tak toto tento tato ten tito ti tyto pro před přes při nad pod mezi bez kromě vůči ohledně dne
+obhájce obhájkyně soudce soudkyně advokát advokátka zástupce zástupkyně jednatel jednatelka ředitel ředitelka
+vedoucí odvolatel odvolatelka dlužník dlužnice věřitel věřitelka pachatel poškozený poškozená""".split())
+WORD_BEFORE = re.compile(rf"(?<![^\W\d_])[{CAPITALS}][^\W\d_]*(?:-[^\W\d_]+)*(?=[ \t]+\Z)")
+
+
+def given_before(text, start):
+    """Start of a capitalised word that directly precedes a known surname at ``start`` and may be a given name."""
+    found = WORD_BEFORE.search(text, max(0, start - 40), start)
+    if not found:
+        return start
+    word = found.group()
+    folded = word.casefold()
+    if (len(word) < 3 or word.isupper() or folded in BEFORE_SURNAME_NOT or folded in NAME_STOP
+            or folded in NOT_SURNAME or folded in TITLE_WORDS
+            or (ROLE_ALT_FULL.fullmatch(folded) and not folded.startswith(ROLE_NOT))):
+        return start
+    return found.start()
+
+
+def given_findings(text, forms):
+    """Find known given names (``forms``: form -> identity) written as a capitalised word of their own.
+
+    A word at the start of a sentence counts only when a comma follows it ("Ilona, děkuji") or the
+    form is not an ordinary word.
+    """
+    for word in CAP_WORD.finditer(text):
+        identity = forms.get(word.group().casefold())
+        if not identity:
+            continue
+        start, end = word.span()
+        if (start and text[start - 1] == "[") or text[end:end + 1] == "-" or text[end:end + 2] == "]":
+            continue
+        if INSTITUTION_BEFORE.search(text, max(0, start - 40), start):
+            continue
+        if sentence_start(text, start) and text[end:end + 1] != "," and word.group().casefold() in COMMON_GIVEN:
+            continue
+        yield start, end, "OSOBA", identity
+
+
+def family_findings(text, families, local, contexts=True):
+    """Find every known surname (any case, either gender) and surnames named by a context.
+
+    ``families`` and ``local`` hold family keys. A capitalised word whose family
+    is known is a person, except common words at the start of a sentence and
+    institution names such as "soud v Kolíně". After "pan", a role or a title, a
+    single capitalised word is a person and its family becomes known for the
+    whole text. One pass over the capitalised words, one dictionary lookup each.
+    ``contexts=False`` skips the search for new persons (a repeated scan of replaced text).
+    """
+    low = lowered(text) if contexts else ""
+    for hit in CONTEXT_START.finditer(low) if contexts else ():
+        start = hit.start()
+        if start and low[start - 1].isalpha():
+            continue
+        context = ROLE_AFTER.match(low, start)
+        if context and context.group().startswith(ROLE_NOT):
+            continue
+        context = context or TITLE_AFTER.match(low, start)
+        if not context:
+            continue
+        word = CAP_WORD.match(text, context.end())
+        if not word:
+            continue
+        value = word.group()
+        folded = value.casefold()
+        if (len(value) > 2 and (len(value) > 3 or not value.isupper())
+                and folded not in NOT_SURNAME and folded not in NAME_STOP and folded not in GIVEN
+                and folded not in TITLE_WORDS and not CAPITAL_NEXT.match(text, word.end())):
+            local.update(key for key, _ in family_keys(value))
+    if not families and not local:
+        return
+    for word in CAP_WORD.finditer(text):
+        keys = family_keys(word.group())
+        key = keys[0][0]
+        if key in families or key in local:
+            found = keys[0]
+        elif len(keys) == 1:
+            continue
+        else:
+            found = next((pair for pair in keys[1:] if pair[0] in families or pair[0] in local), None)
+            if not found:
+                continue
+        start, end = word.span()
+        if start and text[start - 1] == "[" and text[end:end + 1] == "-":
+            continue  # a label such as [OSOBA-1]
+        if INSTITUTION_BEFORE.search(text, max(0, start - 40), start):
+            continue
+        if found[0] in COMMON_KEYS and sentence_start(text, start) and not person_before(text, start, end):
+            continue
+        # "Vojmír Kvasnička": a capitalised word right before the surname is most likely its given name.
+        yield given_before(text, start), end, "OSOBA", f"~{found[0]}|{found[1] or ''}"
 
 
 CITY = rf"(?:{CAP})(?:{SPACE}(?:(?:nad|pod|u|na|ve|v|a){SPACE})?{CAP}){{0,3}}"
@@ -137,18 +426,110 @@ MONTHS = "ledna února března dubna května června července srpna září ř�
 BIRTH_TEXT = re.compile(BIRTH.pattern.replace(r"(\d{1,2})\.[ \t\n]*(\d{4})", "(" + "|".join(MONTHS) + rf"){SPACE}(\d{{4}})"), re.I)
 
 
+COMMA = re.compile(r"\s*,\s*")
+POSTCODE_PREFIX = re.compile(r"^\d{3}[ \t]?\d{2}\s+")
+
+
 def address_identity(value):
-    parts = re.split(r"\s*,\s*", value.casefold())
-    parts = [re.sub(r"^\d{3}[ \t]?\d{2}\s+", "", part) for part in parts]
+    parts = COMMA.split(value.casefold())
+    parts = [POSTCODE_PREFIX.sub("", part) for part in parts]
     return ", ".join(sorted(" ".join(part.split()) for part in parts))
 
 
-def contextual_findings(text, known_surnames=()):
-    for match in COMPANY.finditer(text):
+# Fast scanning. The patterns below run with re.IGNORECASE, which disables the
+# regex engine's literal prefix search, so every position of a long text is
+# tried. These helpers locate the few positions where a match can start with a
+# plain anchor (a sequence of character classes, which the engine scans fast)
+# and then run the unchanged pattern there. An anchor may match more positions
+# than the pattern but never fewer, and the helpers return exactly the matches
+# of ``pattern.finditer(text)``.
+# Letters whose IGNORECASE class holds more than their two cases (see the test).
+FOLDED = {"s": "sSſ", "i": "iIİı", "k": "kK\u212a"}
+
+
+def cls(letters):
+    """Character class matching any of ``letters`` in either case."""
+    return "[" + "".join(FOLDED.get(letter, letter.lower() + letter.upper()) for letter in letters) + "]"
+
+
+def ci(word):
+    """Regex source matching ``word`` in any case, without the IGNORECASE flag."""
+    return "".join(cls(letter) if letter.lower() != letter.upper() else re.escape(letter) for letter in word)
+
+
+def anchored(pattern, start, text):
+    """Matches of ``pattern`` that can only start where ``start`` matches."""
+    position, search, match = 0, start.search, pattern.match
+    while True:
+        hit = search(text, position)
+        if hit is None:
+            return
+        found = match(text, hit.start())
+        if found:
+            yield found
+            position = found.end()
+        else:
+            position = hit.start() + 1
+
+
+def colon_lines(pattern, text):
+    """Matches of a single-line pattern that must contain a colon."""
+    find, end = text.find, len(text)
+    colon = find(":")
+    while colon != -1:
+        line_start = text.rfind("\n", 0, colon) + 1
+        line_end = find("\n", colon)
+        if line_end == -1:
+            line_end = end
+        yield from pattern.finditer(text, line_start, line_end)
+        colon = find(":", line_end)
+
+
+# nar, dat
+BIRTH_START = re.compile(cls("nd") + cls("a") + cls("rt"))
+# byt, byd, síd, trv, dor, adr
+ADDRESS_START = re.compile(cls("bsatd") + cls("yíord") + cls("tdvr"))
+# a. s., s. r. o., spol. s r. o.
+COMPANY_START = re.compile(cls("as") + rf"(?:\.|{ci('pol')}\.)")
+COMPANY_END = re.compile(
+    r"(?:a\.[ \t]*s\.|s\.[ \t]*r\.[ \t]*o\.|spol\.[ \t]*s[ \t]*r\.[ \t]*o\.)(?=[ \t]*[,;)]|[ \t]*$)",
+    re.I | re.M,
+)
+WORD_START = re.compile(r"(?<!\w)\S")
+
+
+def company_matches(text):
+    """``COMPANY.finditer(text)``, trying only starts within reach of a legal form."""
+    windows = []
+    for hit in COMPANY_START.finditer(text):
+        if COMPANY_END.match(text, hit.start()):
+            # The name is at most 101 characters before the blanks that precede the form.
+            first = hit.start()
+            while first and text[first - 1] in " \t":
+                first -= 1
+            windows.append((max(first - 101, 0), hit.start()))
+    windows.sort()
+    last = 0
+    for low, high in windows:
+        position = max(low, last)
+        while position < high:
+            word = WORD_START.search(text, position, high)
+            if word is None:
+                break
+            found = COMPANY.match(text, word.start())
+            if found:
+                yield found
+                last = position = found.end()
+            else:
+                position = word.start() + 1
+
+
+def contextual_findings(text, known_surnames=(), families=(), contexts=True, given=None):
+    for match in company_matches(text):
         yield *match.span(1), "ORGANIZACE", match[1]
-    for match in SLOVAK_FIELD.finditer(text):
+    for match in colon_lines(SLOVAK_FIELD, text):
         yield *match.span(1), "OSOBNI_UDAJ", match[1]
-    for match in FORM_FIELD.finditer(text):
+    for match in colon_lines(FORM_FIELD, text):
         kind = column_kind(match[1])
         value = match[2].rstrip(" \t.")
         if kind and plausible_value(kind, value):
@@ -158,7 +539,7 @@ def contextual_findings(text, known_surnames=()):
         if not cited_decision(text, match):
             yield *match.span(1), "SPIS", match[1]
     for pattern in (BIRTH, BIRTH_TEXT):
-        for match in pattern.finditer(text):
+        for match in anchored(pattern, BIRTH_START, text):
             day, month, year = match.groups()
             month = int(month) if month.isdecimal() else MONTHS.index(month.casefold()) + 1
             try:
@@ -166,7 +547,7 @@ def contextual_findings(text, known_surnames=()):
             except ValueError:
                 continue
             yield match.start(1), match.end(3), "NAROZENI", birth.isoformat()
-    for cue in ADDRESS_CUE.finditer(text):
+    for cue in anchored(ADDRESS_CUE, ADDRESS_START, text):
         match = ADDRESS.match(text, cue.end())
         if match:
             yield *match.span(), "ADRESA", address_identity(match[0])
@@ -174,6 +555,7 @@ def contextual_findings(text, known_surnames=()):
         yield *match.span(), "ADRESA", address_identity(match[0])
     end = 0
     surnames = set()
+    local = set()
     for match in NAME.finditer(text):
         if match.start() < end:
             continue
@@ -185,8 +567,14 @@ def contextual_findings(text, known_surnames=()):
             end = match.end(1)
             identity = name_identity(match[2], match[3])
             surnames.add(identity.split(" ", 1)[1])
+            local.update(key for key, _ in identity_family(identity)[0])
             yield *match.span(1), "OSOBA", identity
-    yield from initial_findings(text, surnames | set(known_surnames))
+    for item in initial_findings(text, surnames | set(known_surnames)):
+        local.update(key for key, _ in identity_family(item[3])[0])
+        yield item
+    yield from family_findings(text, families, local, contexts)
+    if given:
+        yield from given_findings(text, given)
 
 
 INITIALS = rf"(?:[{UPPER}]\.[ \t]?){{1,2}}"
@@ -203,10 +591,39 @@ def initial_identity(initials, last):
     return f"{letters} {surname}"
 
 
+INITIAL_START = re.compile(rf"[{UPPER}]\.")
+
+
+def initial_first_matches(text):
+    return anchored(INITIAL_FIRST, INITIAL_START, text)
+
+
+def initial_last_matches(text):
+    """``INITIAL_LAST.finditer(text)``: the surname is the word before blanks and initials."""
+    position = 0
+    for hit in INITIAL_START.finditer(text):
+        initials = hit.start()
+        if not initials or text[initials - 1] not in " \t":
+            continue
+        blanks = initials
+        while blanks and text[blanks - 1] in " \t":
+            blanks -= 1
+        word = blanks
+        while word and not text[word - 1].isspace():
+            word -= 1
+        for start in range(max(word, position), blanks):
+            found = INITIAL_LAST.match(text, start)
+            if found:
+                yield found
+                position = found.end()
+                break
+
+
 def initial_findings(text, known):
     """Find "J. Novák", "JUDr. K. Bílá" or "Novák J." when the context marks a person."""
-    for pattern, initials_group, surname_group in ((INITIAL_FIRST, 1, 2), (INITIAL_LAST, 2, 1)):
-        for match in pattern.finditer(text):
+    for matches, initials_group, surname_group in (
+            (initial_first_matches, 1, 2), (initial_last_matches, 2, 1)):
+        for match in matches(text):
             last = match[surname_group]
             if last.split("-")[0].casefold() in NAME_STOP or last.casefold() in GIVEN:
                 continue
@@ -253,9 +670,25 @@ FORM_FIELD = re.compile(
 )
 
 
+LINE_HYPHEN = re.compile(r"(?<=\w)-[ \t]*[\r\n\v\f\u2028\u2029]\s*(?=\w)")
+
+
+def line_breaks(header):
+    """Normalise a heading split over several lines or paragraphs into one line.
+
+    Breaks, tabs and non-breaking spaces become spaces and a word hyphenated at
+    the end of a line is rejoined ("Datum naro-\nzení"); only recognition of the
+    heading changes, never the cell value.
+    """
+    text = str(header).replace("\u00ad", "")
+    text = LINE_HYPHEN.sub("", text)
+    return " ".join(text.split())
+
+
 def column_kind(header):
     """Return the finding kind for a table column header, or None."""
-    text = " ".join(str(header).replace(" ", " ").split()).strip(" :*").casefold()
+    from .rules import NORMALIZE
+    text = " ".join(line_breaks(str(header).translate(NORMALIZE)).split()).strip(" :*").casefold()
     for kind, pattern in COLUMN_HEADERS:
         if pattern.fullmatch(text):
             return kind
@@ -363,7 +796,7 @@ def structured_identity(kind, value):
         if len(words) == 2 and all(re.fullmatch(rf"{NAME_WORD}(?:-{NAME_WORD})*", word) for word in words):
             return name_identity(*words)
     if kind in {"RC", "TELEFON", "UCET", "ICO", "DIC", "IBAN"}:
-        text = re.sub(r"\s", "", text)
+        text = re.sub(r"[^\d]" if kind == "RC" else r"\s", "", text)
         if kind == "TELEFON":
             text = text.removeprefix("+420")
     return text.casefold()
