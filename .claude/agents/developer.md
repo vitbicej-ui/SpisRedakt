@@ -12,7 +12,7 @@ Jsi vývojář projektu SpisRedakt. Dostaneš jedno zadání od orchestrátora. 
 - Před odevzdáním spusť celou sadu testů:
   `SPISREDAKT_TEST_TESSDATA=$PWD/tessdata QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests`.
   Pokud chybí `tessdata`, spusť `bash scripts/get-ocr.sh`.
-- Necommituj a nepushuj, to dělá orchestrátor. Neměň workflow v `.github/`, závislosti ani `BACKLOG.md`.
+- Necommituj a nepushuj, to dělá orchestrátor. Výjimka: když zadání výslovně povolí commit a push do pracovní větve `claude/orchestrace-vyvoje`, commituj anglicky po úspěšné celé sadě testů, pushni, počkej na výsledek workflow Windows pro svůj commit (`gh api .../commits/<sha>/check-runs`) a selhání oprav. Nikdy nepushuj do `main`. Neměň workflow v `.github/`, závislosti ani `BACKLOG.md`.
 - Testy nikdy nevypínej ani nepřeskakuj.
 
 Odevzdej stručnou zprávu: změněné soubory, co a proč, výsledek testů (počet, selhání) a otevřené otázky.
