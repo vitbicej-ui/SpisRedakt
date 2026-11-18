@@ -46,8 +46,11 @@ NON_DIGIT = re.compile(r"\D")
 AT_LOOKALIKE = re.compile(
     r"(?<=[\w.+-])(?:[©®]|\((?:at|AT)\)|\[(?:at|AT)\])[ĎďĚě ]?(?=[\w-])"
     r"|(?<=[\w.+-])[ \t]?\n?[ \t]?(?:\([Aa@]\)?|[@©®])[ \t]?\n?[ \t]?(?=[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b)"
-    # A lone "A" between blanks counts only when the part before it has a dot (checked below).
-    r"|(?<=[\w+-])[ \t\n]{1,2}(?P<lone>[Aa])[ \t\n]{1,2}(?=[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b)")
+    # A lone letter after a blank ("novak A example.test", "novak Wexample.test") counts only when the
+    # part before it has a dot, the domain is no file name and, for letters other than A, "mail" is near.
+    r"|(?<=[\w+-])[ \t\n]{1,2}(?P<lone>[A-Za-z])[ \t\n]{0,2}(?=[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b)")
+MAIL_CUE = re.compile(r"mail", re.I)
+LOCAL_PART = re.compile(r"[\w.+-]+\Z")
 
 
 FILE_SUFFIXES = {"pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf", "txt",
@@ -59,15 +62,21 @@ def lookalike_emails(text):
     lowered = text.lower()
     if not ("©" in text or "®" in text or "(at)" in lowered or "[at]" in lowered or "(a" in lowered
             or "(@" in text or " @" in text or "@ " in text or "\n@" in text or "@\n" in text
-            or " a " in lowered or "\na " in lowered or " a\n" in lowered):
+            or " a " in lowered or "\na " in lowered or " a\n" in lowered or "mail" in lowered):
         return
     view, starts, ends, position, lone = [], [], [], 0, set()
     for match in AT_LOOKALIKE.finditer(text):
+        letter = match.group("lone")
+        if letter:
+            local = LOCAL_PART.search(text, max(0, match.start() - 64), match.start())
+            if (not local or "." not in local.group().strip(".")
+                    or (letter not in "Aa" and not MAIL_CUE.search(text, max(0, match.start() - 80), match.start()))):
+                continue
         chunk = text[position:match.start()]
         view.append(chunk)
         starts += range(position, match.start())
         ends += range(position + 1, match.start() + 1)
-        if match.group("lone"):
+        if letter:
             lone.add(len(starts))  # position of this "@" in the view
         view.append("@")
         starts.append(match.start())

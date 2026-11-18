@@ -136,8 +136,6 @@ class ScanTests(unittest.TestCase):
             source, target = Path(folder) / "a.pdf", Path(folder) / "b.pdf"
             source.write_bytes(data)
             documents.redact_pdf(source, target, Rules(), TESSDATA)
-            with pymupdf.open(source) as original:  # what the redaction saw (synthetic data only)
-                self.ocr_seen = [documents.recognize_image(page.get_pixmap(dpi=300), TESSDATA)[0] for page in original]
             texts = list(layers(target, TESSDATA))
             self.seen = texts  # synthetic data only: shown when an assertion fails
             return scan_texts(texts, values)
@@ -148,7 +146,7 @@ class ScanTests(unittest.TestCase):
         counted = self.leaks(data, [Value("JMENO", "Radoslava Ondráčková"), Value("PRIJMENI", "Ondráčková"),
                                     Value("EMAIL", "radoslava.ondrackova@example.test"),
                                     Value("TELEFON", "733 456 789")])
-        self.assertEqual(sum(counted.values()), 0, f"{dict(counted)} {ascii(self.seen)} REDACTION-OCR {ascii(self.ocr_seen)}")
+        self.assertEqual(sum(counted.values()), 0, f"{dict(counted)} {ascii(self.seen)}")
 
     def test_text_layer_phone_split_over_two_lines(self):
         data = spis.text_pdf(["Plátce Karel Hájek, IČO: 60193531, účet 35-1122334455/0800, tel. 774 220 861."])
