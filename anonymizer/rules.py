@@ -162,6 +162,8 @@ class Rules:
         # given name form (any case) -> canonical given names; canonical -> labels of the persons that have it
         self.given_forms = {}
         self.given_labels = {}
+        # given_identities() is needed by every find(); it is rebuilt only after register_given() changed the forms
+        self._given_cache = None
         # labels that so far stand for a bare surname only
         self.bare = set()
         # kind -> original strings found. Memory only: never written, logged or put into a message.
@@ -231,6 +233,11 @@ class Rules:
 
     def given_identities(self):
         """Form -> identity ("!canonical|…") of the given names of the persons known by a full name."""
+        if self._given_cache is None:
+            self._given_cache = self.build_given_identities()
+        return self._given_cache
+
+    def build_given_identities(self):
         return {form: "!" + "|".join(sorted(canonicals)) for form, canonicals in self.given_forms.items()}
 
     def register_given(self, identity, label):
@@ -246,6 +253,7 @@ class Rules:
                 self.given_labels[canonical].append(label)
             for form in set(GIVEN_FORMS.get(canonical, ())) | {first, canonical}:
                 self.given_forms.setdefault(form, set()).add(canonical)
+        self._given_cache = None
 
     def given_label(self, identity):
         """Label of a lone given name: that of the one person known with it, else one label for all of them."""

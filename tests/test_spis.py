@@ -7,6 +7,7 @@ import hashlib
 import io
 import os
 import re
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -302,6 +303,167 @@ class WholePathTests(unittest.TestCase):
                 for kind in ZERO_LEAK_KINDS:
                     self.assertEqual(counted[kind], 0, f"Únik druhu {kind} v režimu {mode}.")
             self.assertTrue(all(isinstance(total, dict) for total in totals.values()))
+
+
+class PerformanceTests(unittest.TestCase):
+    """Memory and speed of the path through a big case file; synthetic data only."""
+
+    def test_control_zip_streams_a_big_member(self):
+        import tracemalloc
+
+        from anonymizer.formats import redact_archive
+        from anonymizer.rules import Rules
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import benchmark_spis
+
+        size = 40_000_000
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            big = root / "velka.pdf"
+            benchmark_spis.big_pdf(big, size)
+            source, target = root / "vstup.zip", root / "vystup.zip"
+            with zipfile.ZipFile(source, "w") as packed:
+                packed.write(big, "velka.pdf", compress_type=zipfile.ZIP_STORED)
+            big.unlink()
+            self.assertGreater(source.stat().st_size, size)
+            tracemalloc.start()
+            try:
+                skipped = redact_archive(source, target, Rules())
+                peak = tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+            self.assertEqual(skipped, [], "Velká položka nebyla zpracována.")
+            self.assertLess(peak, size // 4, "Položka archivu se při kontrolní kopii načetla celá do paměti.")
+            with zipfile.ZipFile(target) as result:
+                self.assertEqual(result.namelist(), ["polozka-0001.pdf"])
+                self.assertLess(result.getinfo("polozka-0001.pdf").file_size, 1_000_000)
+
+    def test_control_zip_keeps_order_and_codes(self):
+        from anonymizer.formats import NOT_PROCESSED, redact_archive
+        from anonymizer.rules import Rules
+
+        with tempfile.TemporaryDirectory() as folder:
+            source, target = Path(folder) / "vstup.zip", Path(folder) / "vystup.zip"
+            nested = io.BytesIO()
+            with zipfile.ZipFile(nested, "w") as inner:
+                inner.writestr("a.txt", f"Telefon {spis.PEOPLE['wolf'].phone}.")
+                inner.writestr("b.bin", b"\x00\x01\x02 neznamy format")
+            with zipfile.ZipFile(source, "w") as packed:
+                packed.writestr("1.txt", f"Telefon {spis.PEOPLE['novak'].phone}.")
+                packed.writestr("2.bin", b"\x00\x01\x02 neznamy format")
+                packed.writestr("3.zip", nested.getvalue())
+                packed.writestr("4.txt", "Bez osobních údajů.")
+                packed.writestr("5.docx", spis.docx(lambda document: spis.with_frame(document, ["Text bez údajů."])))
+            from anonymizer.rules import Rules as Fresh
+
+            skipped = redact_archive(source, target, Fresh())
+            self.assertEqual(skipped, [(2, "archive_member_unsupported"), (3, "archive_member_unsupported")])
+            with zipfile.ZipFile(target) as result:
+                self.assertEqual(sorted(result.namelist()),
+                                 sorted(["polozka-0001.txt", "polozka-0003.zip", "polozka-0004.txt", "polozka-0005.docx",
+                                         NOT_PROCESSED]))
+                self.assertNotIn(spis.PEOPLE["novak"].phone, result.read("polozka-0001.txt").decode())
+                with zipfile.ZipFile(io.BytesIO(result.read("polozka-0003.zip"))) as inner:
+                    self.assertEqual(inner.namelist()[0], "polozka-0001.txt")
+                    self.assertNotIn(spis.PEOPLE["wolf"].phone, inner.read("polozka-0001.txt").decode())
+
+    def test_given_names_are_rebuilt_only_after_a_change(self):
+        from anonymizer.rules import Rules
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import benchmark_spis
+
+        rules = Rules()
+        self.assertEqual(rules.given_identities(), {})
+        previous = rules.given_identities()
+        for number in range(60):
+            person = benchmark_spis.make_person(number)
+            rules.replace(f"Svědek {person.name} byl vyslechnut. Potom {person.first} odešel.")
+            self.assertEqual(rules.given_identities(), rules.build_given_identities())
+            if number:
+                self.assertIsNot(rules.given_identities(), previous)
+            self.assertIs(rules.given_identities(), rules.given_identities())
+            previous = rules.given_identities()
+
+    def test_black_fill_equals_set_rect(self):
+        from anonymizer.documents import fill_black
+
+        def sheet():
+            pixmap = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 97, 61), False)
+            pixmap.clear_with(200)
+            return pixmap
+
+        for area in (pymupdf.IRect(3, 4, 50, 20), pymupdf.IRect(0, 0, 97, 61), pymupdf.IRect(96, 60, 97, 61)):
+            fast, slow = sheet(), sheet()
+            self.assertTrue(fill_black(fast, area))
+            self.assertTrue(slow.set_rect(area, (0, 0, 0)))
+            self.assertEqual(bytes(fast.samples), bytes(slow.samples))
+        gray = pymupdf.Pixmap(pymupdf.csGRAY, pymupdf.IRect(0, 0, 10, 10), False)
+        gray.clear_with(255)
+        self.assertTrue(fill_black(gray, pymupdf.IRect(1, 1, 5, 5)))
+        self.assertEqual(tuple(gray.pixel(2, 2)), (0,))
+
+    def test_leak_detector_shortcut_gives_the_old_counts(self):
+        import re
+
+        from anonymizer import leaks
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import benchmark_spis
+
+        people = list(spis.PEOPLE.values()) + [benchmark_spis.make_person(i) for i in range(12)]
+        values = [value for person in people for value in person.values()]
+        texts = []
+        for person in people:
+            digits = person.rc.replace("/", "")
+            texts += [f"Svědek {person.name}, nar. {person.date('padded')}, bytem {person.address}, tel. +420 {person.phone}.",
+                      f"{person.last.upper()} {person.first}; RČ {digits[:6]} \u2013 {digits[6:]}; č. ú. {person.account}",
+                      f"Doklad {person.document[:3]}\u2010{person.document[3:]}, e-mail {person.email.upper()}.",
+                      f"{person.date('long')}; {person.date('iso')}; pan {person.last[:-1]}\u0131m",
+                      "Nic osobního, jen věta o smlouvě z 1. 2. 2020, č. 12345."]
+        texts.append("")
+
+        def old(texts):
+            """The detector as it was before: every pattern runs on every text."""
+            found = leaks.collections.Counter()
+            jobs = []
+            for value in dict.fromkeys(values):
+                for pattern in leaks._patterns(value):
+                    check = (leaks._common_ok if value.common and value.kind == "PRIJMENI" else
+                             leaks._capitalized if value.kind == "KRESTNI" else
+                             leaks._grouped if value.kind in {"RC", "ICO", "UCET", "DOKLAD", "TELEFON"} else None)
+                    jobs.append((leaks.PRIORITY.index(value.kind), value.kind, re.compile(pattern, re.IGNORECASE), check))
+            for text in texts:
+                plain = leaks._plain(text)
+                spans = []
+                for priority, kind, expression, check in jobs:
+                    for match in expression.finditer(plain):
+                        if match.end() > match.start() and (check is None or check(plain, match)):
+                            spans.append((priority, match.start(), match.end(), kind))
+                covered = bytearray(len(plain))
+                for _, start, end, kind in sorted(spans):
+                    if not any(covered[start:end]):
+                        covered[start:end] = b"\1" * (end - start)
+                        found[kind] += 1
+            return found
+
+        counted = scan_texts(texts, values)
+        self.assertEqual(counted, old(texts))
+        self.assertGreater(sum(counted.values()), len(people) * 5)
+
+    @needs_ocr
+    def test_benchmark_script_runs_in_its_smallest_configuration(self):
+        import subprocess
+
+        script = Path(__file__).resolve().parents[1] / "scripts" / "benchmark_spis.py"
+        done = subprocess.run([sys.executable, "-I", str(script), "--pages", "2", "--mb", "3", "--rows", "30",
+                               "--tessdata", TESSDATA], capture_output=True, text=True, timeout=900,
+                              env=dict(os.environ, QT_QPA_PLATFORM="offscreen"))
+        self.assertEqual(done.returncode, 0, "Měřicí skript selhal.")
+        self.assertIn("Čas celkem", done.stdout)
+        self.assertIn("Špička paměti", done.stdout)
+        self.assertEqual(done.stdout.count("Úniky: 0"), 2, "Měřicí skript našel únik nebo ho nezkontroloval.")
 
 
 if __name__ == "__main__":

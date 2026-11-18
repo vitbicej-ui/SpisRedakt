@@ -200,15 +200,73 @@ def _patterns(value):
         yield rf"(?<!\w){words}{tail}(?:\s+(?:ulic[ei]|ul\.?))?\s*,?\s*{number}(?!\d)"
 
 
+_SQUEEZE = re.compile(r"[\s./\-\u2010-\u2013]+")
+# Letters that ``re.IGNORECASE`` treats as equal to an ASCII letter although ``str.lower`` keeps them apart.
+_EQUIVALENT = str.maketrans({"\u0131": "i", "\u017f": "s"})
+
+
+def _lowered(text):
+    return text.lower().translate(_EQUIVALENT)
+
+
+def _needles(value):
+    """For each pattern of ``_patterns(value)``: ``(squeezed, strings)``, or None when no shortcut is known.
+
+    Every match of the pattern contains one of the ``strings`` (lower case, in the text itself or, when
+    ``squeezed``, in the text without blanks, dots, slashes and hyphens). A text without them cannot match,
+    so the pattern is not run on it. This only skips work: a pattern that could match is always run.
+    """
+    text = value.text.strip()
+    if value.kind == "JMENO":
+        return [(False, tuple(_lowered(form) for form in _forms(text.split()[-1], False)))]
+    if value.kind == "PRIJMENI":
+        return [(False, tuple(_lowered(form) for form in _forms(text, False)))]
+    if value.kind == "KRESTNI":
+        return [(False, tuple(_lowered(form) for form in _forms(text, True)))]
+    if value.kind in {"RC", "ICO"}:
+        return [(True, (_digits(text),))]
+    if value.kind == "TELEFON":
+        return [(True, (_digits(text)[-9:],))]
+    if value.kind == "UCET":
+        found = [(True, (_digits(text),))]
+        if "/" in text and len(_digits(text.split("/")[0])) >= 6:
+            found.append((True, (_digits(text.split("/")[0]),)))
+        return found
+    if value.kind == "DOKLAD":
+        return [(True, (_SQUEEZE.sub("", _lowered(_folded(text))),))]
+    if value.kind == "NAROZENI":
+        year = str(int(text.split("-")[0]))
+        return [(False, (year,)), (False, (year,))]
+    return None
+
+
+class _Job:
+    __slots__ = ("priority", "kind", "pattern", "check", "squeezed", "needles", "expression")
+
+    def __init__(self, priority, kind, pattern, check, shortcut):
+        self.priority, self.kind, self.pattern, self.check = priority, kind, pattern, check
+        self.squeezed, self.needles = shortcut if shortcut else (False, None)
+        self.expression = None
+
+    def matches(self, plain):
+        if self.expression is None:
+            self.expression = re.compile(self.pattern, re.IGNORECASE)
+        return self.expression.finditer(plain)
+
+
 @functools.lru_cache(maxsize=8)
 def _compile(values):
     jobs = []
     for value in dict.fromkeys(values):
-        for pattern in _patterns(value):
+        patterns = list(_patterns(value))
+        shortcuts = _needles(value)
+        if shortcuts is None or len(shortcuts) != len(patterns):
+            shortcuts = [None] * len(patterns)
+        for pattern, shortcut in zip(patterns, shortcuts):
             check = (_common_ok if value.common and value.kind == "PRIJMENI" else
                      _capitalized if value.kind == "KRESTNI" else
                      _grouped if value.kind in {"RC", "ICO", "UCET", "DOKLAD", "TELEFON"} else None)
-            jobs.append((PRIORITY.index(value.kind), value.kind, re.compile(pattern, re.IGNORECASE), check))
+            jobs.append(_Job(PRIORITY.index(value.kind), value.kind, pattern, check, shortcut))
     return jobs
 
 
@@ -242,11 +300,17 @@ def scan_texts(texts, values):
         if not text:
             continue
         plain = _plain(text)
+        lowered = _lowered(plain)
+        squeezed = _SQUEEZE.sub("", lowered)
         spans = []
-        for priority, kind, expression, check in jobs:
-            for match in expression.finditer(plain):
-                if match.end() > match.start() and (check is None or check(plain, match)):
-                    spans.append((priority, match.start(), match.end(), kind))
+        for job in jobs:
+            if job.needles is not None:
+                haystack = squeezed if job.squeezed else lowered
+                if not any(needle in haystack for needle in job.needles):
+                    continue
+            for match in job.matches(plain):
+                if match.end() > match.start() and (job.check is None or job.check(plain, match)):
+                    spans.append((job.priority, match.start(), match.end(), job.kind))
         covered = bytearray(len(plain))
         for _, start, end, kind in sorted(spans):
             if not any(covered[start:end]):

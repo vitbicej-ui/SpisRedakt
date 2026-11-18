@@ -93,6 +93,27 @@ def text_geometry(raw):
     return "".join(text), boxes
 
 
+def is_plain_rgb(pixmap):
+    # Colorspace objects are compared by identity, so ``pixmap.colorspace == pdf.csRGB`` is always false.
+    return pixmap.n == 3 and not pixmap.alpha and pixmap.colorspace is not None and pixmap.colorspace.name == "DeviceRGB"
+
+
+def fill_black(pixmap, area):
+    """Fill ``area`` (an IRect inside the pixmap) with black; same result as ``pixmap.set_rect(area, (0, 0, 0))``.
+
+    PyMuPDF fills a rectangle pixel by pixel in Python, which dominates the processing of a page, so an
+    RGB pixmap without alpha is filled row by row instead.
+    """
+    if not is_plain_rgb(pixmap):
+        return pixmap.set_rect(area, (0, 0, 0))
+    view, width = pixmap.samples_mv, (area.x1 - area.x0) * 3
+    black = bytes(width)
+    for row in range(area.y0, area.y1):
+        start = row * pixmap.stride + area.x0 * 3
+        view[start:start + width] = black
+    return True
+
+
 def blackout(pixmap, rectangle, matrix):
     pixel_rect = (rectangle * matrix).irect
     pixel_rect.x0 -= 2
@@ -100,7 +121,7 @@ def blackout(pixmap, rectangle, matrix):
     pixel_rect.x1 += 2
     pixel_rect.y1 += 2
     pixel_rect &= pixmap.irect
-    if pixel_rect.is_empty or not pixmap.set_rect(pixel_rect, (0, 0, 0)):
+    if pixel_rect.is_empty or not fill_black(pixmap, pixel_rect):
         raise ValueError("Oblast redakce je mimo obraz stránky.")
     return pixel_rect
 
@@ -155,7 +176,7 @@ def ocr_pixmap(pixmap):
     Transparent pixels are laid on white (they would turn black); the size stays the same, so boxes
     found on the copy fit the original pixmap.
     """
-    if pixmap.colorspace == pdf.csRGB and not pixmap.alpha:
+    if is_plain_rgb(pixmap):
         return pixmap
     if pixmap.colorspace is None:
         raise ValueError("Vložený obrázek nelze vykreslit.")

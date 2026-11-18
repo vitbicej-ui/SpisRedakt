@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import tempfile
 from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
 
@@ -192,6 +193,18 @@ def redact_text(data, suffix, rules):
 NOT_PROCESSED = "NEZPRACOVANO.txt"
 
 
+def copy_limited(stream, target, limit=ARCHIVE_BYTES, block=1 << 20):
+    """Copy a stream block by block and refuse it as soon as it exceeds the limit."""
+    size = 0
+    with open(target, "wb") as out:
+        while chunk := stream.read(block):
+            size += len(chunk)
+            if size > limit:
+                raise FormatError("size_limit", "Položka archivu překračuje limit velikosti.")
+            out.write(chunk)
+    return size
+
+
 def redact_archive(source, target, rules, tessdata=None, depth=0, budget=None):
     """Redact every supported member of a ZIP archive into a new archive.
 
@@ -220,36 +233,46 @@ def redact_archive(source, target, rules, tessdata=None, depth=0, budget=None):
             if entry.is_dir():
                 continue
             order += 1
-            try:
-                if entry.flag_bits & 1:
-                    raise FormatError("archive_encrypted", "Archiv obsahuje zašifrovaný soubor.")
-                if entry.file_size > ARCHIVE_BYTES:
-                    raise FormatError("size_limit", "Položka archivu překračuje limit velikosti.")
-                payload = archive.read(entry)
-                suffix = identify(payload, Path(entry.filename).suffix.lower())
-                if suffix == ".zip":
-                    cleaned = io.BytesIO()
-                    skipped.extend((order, code) for _, code in
-                                   redact_archive(io.BytesIO(payload), cleaned, rules, tessdata, depth + 1, budget))
-                    cleaned, released = cleaned.getvalue(), ".zip"
-                elif suffix not in SUPPORTED:
-                    raise FormatError("archive_member_unsupported", "Archiv obsahuje nepodporovanou položku.")
-                elif len(payload) > size_limit(suffix):
-                    raise FormatError("size_limit", "Položka archivu překračuje limit velikosti.")
-                else:
-                    cleaned, released = redact_bytes(payload, suffix, rules, tessdata)
-            except FormatError as error:
-                if error.code == "archive_limit":
-                    raise
-                skipped.append((order, error.code))
-                continue
-            except Exception as error:
-                code = reason_code(error)
-                skipped.append((order, "processing_error" if code == "other" else code))
-                continue
-            # The member is complete and checked; only now does it enter the output.
-            output.writestr(f"polozka-{order:04d}{released}", cleaned)
-            del payload, cleaned
+            # The member never sits in memory as a whole: it is streamed (with the size limit) into a
+            # private temporary file and processed from its path.
+            with tempfile.TemporaryDirectory(prefix="SpisRedakt-member-") as folder:
+                try:
+                    if entry.flag_bits & 1:
+                        raise FormatError("archive_encrypted", "Archiv obsahuje zašifrovaný soubor.")
+                    if entry.file_size > ARCHIVE_BYTES:
+                        raise FormatError("size_limit", "Položka archivu překračuje limit velikosti.")
+                    staged = Path(folder) / "input"
+                    with archive.open(entry) as stream:
+                        copy_limited(stream, staged)
+                    suffix = identify(staged, Path(entry.filename).suffix.lower())
+                    if suffix == ".zip":
+                        released = ".zip"
+                        cleaned = Path(folder) / "output.zip"
+                        skipped.extend((order, code) for _, code in
+                                       redact_archive(staged, cleaned, rules, tessdata, depth + 1, budget))
+                    elif suffix not in SUPPORTED:
+                        raise FormatError("archive_member_unsupported", "Archiv obsahuje nepodporovanou položku.")
+                    elif staged.stat().st_size > size_limit(suffix):
+                        raise FormatError("size_limit", "Položka archivu překračuje limit velikosti.")
+                    else:
+                        staged = staged.rename(staged.with_name("input" + suffix))
+                        released = output_suffix(suffix)
+                        cleaned = Path(folder) / ("output" + released)
+                        if redact_file(staged, cleaned, suffix, rules, tessdata):
+                            # A member is never released with parts missing.
+                            raise FormatError("attachment_unsupported",
+                                              "E-mail nebo archiv obsahuje položku v nepodporovaném formátu.")
+                except FormatError as error:
+                    if error.code == "archive_limit":
+                        raise
+                    skipped.append((order, error.code))
+                    continue
+                except Exception as error:
+                    code = reason_code(error)
+                    skipped.append((order, "processing_error" if code == "other" else code))
+                    continue
+                # The member is complete and checked; only now does it enter the output.
+                output.write(cleaned, f"polozka-{order:04d}{released}")
         if skipped:
             output.writestr(NOT_PROCESSED, "Tyto položky archivu nebyly zpracovány a ve výstupu nejsou "
                             "(uvedeno je jen pořadí a kód důvodu):\n"
