@@ -315,12 +315,33 @@ class WholePathTests(unittest.TestCase):
                 else:
                     with zipfile.ZipFile(archive) as packed:
                         packed.extractall(source)
-                results = list(process_folders(source, target, TESSDATA, markdown=True))
+                from anonymizer import batch as batch_module
+                refused = []
+                checked = batch_module.check_release
+
+                def recording(texts, rules, checked=checked):
+                    # Synthetic data only: keep what the release check would refuse for the failure message.
+                    from anonymizer import leaks
+                    values_found = batch_module.release_values(rules)
+                    for text in texts:
+                        for item in rules.find(text):
+                            refused.append(("rules", item.kind, ascii(text[max(0, item.start - 60):item.end + 20])))
+                        for value in values_found:
+                            if sum(leaks.scan_texts([text], [value]).values()):
+                                found = text.lower().find(value.text.split()[-1].lower()[:6])
+                                refused.append(("detector", value.kind, ascii(text[max(0, found - 60):found + 60])))
+                    return checked(texts, rules)
+
+                batch_module.check_release = recording
+                try:
+                    results = list(process_folders(source, target, TESSDATA, markdown=True))
+                finally:
+                    batch_module.check_release = checked
                 released = [result for result in results if result[1] is not None]
                 if mode == "batch":
                     self.assertTrue(released, "Dávka nevydala žádný soubor.")
                 markdown = next((path for _, path, _ in results if path is not None and path.suffix == ".md"), None)
-                self.assertIsNotNone(markdown, "Markdown nebyl vydán.")
+                self.assertIsNotNone(markdown, f"Markdown nebyl vydán ({mode}): {refused[:6]}")
                 text = markdown.read_text(encoding="utf-8")
                 # The misread numbers of the scanned page are gone from the Markdown (and from the control copy below).
                 self.assertNotIn("3640", text.replace(" ", ""))
