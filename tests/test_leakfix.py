@@ -136,7 +136,9 @@ class ScanTests(unittest.TestCase):
             source, target = Path(folder) / "a.pdf", Path(folder) / "b.pdf"
             source.write_bytes(data)
             documents.redact_pdf(source, target, Rules(), TESSDATA)
-            return scan_texts(layers(target, TESSDATA), values)
+            texts = list(layers(target, TESSDATA))
+            self.seen = texts  # synthetic data only: shown when an assertion fails
+            return scan_texts(texts, values)
 
     def test_scanned_page_with_hyphenated_name_and_email(self):
         data = spis.scan_pdf([["Žalobkyně paní Radoslava Ondráč-", "ková, nar. 2. 2. 1975, bytem Havlíčkova 31,",
@@ -144,7 +146,7 @@ class ScanTests(unittest.TestCase):
         counted = self.leaks(data, [Value("JMENO", "Radoslava Ondráčková"), Value("PRIJMENI", "Ondráčková"),
                                     Value("EMAIL", "radoslava.ondrackova@example.test"),
                                     Value("TELEFON", "733 456 789")])
-        self.assertEqual(sum(counted.values()), 0, dict(counted))
+        self.assertEqual(sum(counted.values()), 0, f"{dict(counted)} {self.seen!r}")
 
     def test_text_layer_phone_split_over_two_lines(self):
         data = spis.text_pdf(["Plátce Karel Hájek, IČO: 60193531, účet 35-1122334455/0800, tel. 774 220 861."])
