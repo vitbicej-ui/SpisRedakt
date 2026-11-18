@@ -150,3 +150,9 @@ Ověřeno orchestrátorem mimo testy vývojářů: ruční příklady příjmen�
   - zkomolená adresa v otočeném skenu na Windows. Řešení platí jen pro text z OCR: po „e-mail“ se nahradí úsek až k čárce, středníku nebo konci řádku, pokud obsahuje zbytek „@“.
 - Cena: druhý průchod přes spojené řádky zpomalí text s mnoha zalomeními asi 1,8×. Proti OCR je to zanedbatelné.
 - Kontrola v LibreOffice (`outputs.yml`) dvakrát skončila na limit 20 min, protože na runneru visel `apt-get install`. Jde o infrastrukturu, ne o kód. Případná úprava workflow (limit nebo opakování `apt`) vyžaduje lidskou kontrolu.
+
+## 13. Úspora tokenů (18. 11. 2026)
+
+- Denní běh v 11:20 zakládá vždy novou session (plánovaná úloha „SpisRedakt – denní běh orchestrátora (nová session)“, model Sonnet). Původní úloha, která budila jednu dlouhou session, je vypnutá.
+- Orchestrátor běží na Sonnetu (`.claude/agents/orchestrator.md`, oddíl „Šetření kontextu a tokenů“). Vícekrokovou práci včetně pushe a oprav Windows CI dělá vývojář. U bezpečnostně citlivých změn se spouští krátká kontrola modelem Opus.
+- Nová session začíná z tohoto souboru a `BACKLOG.md`. Zapisuj sem jen to, co další běh potřebuje.
