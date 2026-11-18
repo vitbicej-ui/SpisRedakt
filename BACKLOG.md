@@ -28,7 +28,7 @@ Cíl běhu 17. 11. 2026 (termín 18. 11.): jeden ZIP se spisem → `spis_anonymi
 ## Kontrola výstupů
 
 - [x] **Linuxový CI job s LibreOffice.** `scripts/check_outputs.py` a workflow `outputs.yml` (schváleno 17. 11. 2026). Rozšířit o PPTX/ODP a e-maily může orchestrátor úpravou skriptu, ne workflow.
-- [ ] **Regresní korpus.** Rozšířit syntetické testy o smíšené skeny, obtížná písma, zalomení řádků a typické soudní šablony (záhlaví, zápatí, doložka „Shodu s prvopisem potvrzuje“).
+- [x] **Regresní korpus.** (6fc8c33, 76e50a9; simulace Windows `tests/winsim.py`, obtížná písma, zalomení, smíšené skeny a soudní šablony; nalezeny a opraveny 3 úniky: hodnoty zalomené přes řádek, adresa po „e-mail“ bez čitelného „@“, zkomolená adresa v otočeném skenu) Rozšířit syntetické testy o smíšené skeny, obtížná písma, zalomení řádků a typické soudní šablony (záhlaví, zápatí, doložka „Shodu s prvopisem potvrzuje“).
 
 ## Funkce
 
@@ -41,6 +41,7 @@ Cíl běhu 17. 11. 2026 (termín 18. 11.): jeden ZIP se spisem → `spis_anonymi
 
 ## Hotovo
 
+- [x] 0.9.0 (vydáno 18. 11. 2026 jako předběžné vydání `v0.9.0`, PR #4): Markdown spisu pro cloudové modely, samotná příjmení, detektor úniků, čísla z OCR, nezlomitelné mezery a měkké spojovníky, e-maily ve skenech z Windows.
 - [x] 0.9.0: spis jako úsporný Markdown pro cloudové modely, samotná příjmení a křestní jména v celém spisu, víceřádkové nadpisy sloupců, vydání spisu bez odmítnutých položek, detektor úniků.
 
 - [x] 0.8.2: rady k odmítnutým souborům v GUI, vstupy kopírované po blocích, 1,7–2,8× rychlejší pravidla.

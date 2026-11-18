@@ -138,3 +138,15 @@ Ověřeno orchestrátorem mimo testy vývojářů: ruční příklady příjmen�
   - Měřicí skript padal na kódování konzole cp1252. Výstup je nově v UTF-8.
 - Ověřování bez Windows: simulace (podvržené `get_text` s U+00A0/U+00AD a písmo Liberation Sans místo DejaVu) a diagnostické výpisy syntetických dat v testech při selhání.
 - Výsledek: Windows CI zelené (259 testů, sestavení a ověření balíčku).
+
+## 12. Vydání 0.9.0 a regresní korpus (18. 11. 2026 večer)
+
+- PR #4 do `main` sloučen (`a691312`) na pokyn vlastníka, ten orchestrátora pověřil i rozhodováním. Vydání spuštěno workflow Release z `main` a vzniklo předběžné vydání `v0.9.0` s balíčkem `SpisRedakt-v0.9.0-Windows-x64.zip`.
+- Před použitím na skutečných spisech zbývá ruční zkouška vlastníka na Windows.
+- Regresní korpus (`6fc8c33`, `76e50a9`): 276 testů. Simulace Windows (`tests/winsim.py`), písma (Liberation, serif, kurzíva, tučné, 7–18 pt, šedý text, otočené skeny), zalomení v PDF, skenu a DOCX, smíšené PDF, soudní šablony.
+- Nalezené a opravené úniky:
+  - hodnoty zalomené přes řádek (rodné číslo, účet, příjmení se spojovníkem),
+  - adresa po „e-mail“ bez čitelného „@“,
+  - zkomolená adresa v otočeném skenu na Windows. Řešení platí jen pro text z OCR: po „e-mail“ se nahradí úsek až k čárce, středníku nebo konci řádku, pokud obsahuje zbytek „@“.
+- Cena: druhý průchod přes spojené řádky zpomalí text s mnoha zalomeními asi 1,8×. Proti OCR je to zanedbatelné.
+- Kontrola v LibreOffice (`outputs.yml`) dvakrát skončila na limit 20 min, protože na runneru visel `apt-get install`. Jde o infrastrukturu, ne o kód. Případná úprava workflow (limit nebo opakování `apt`) vyžaduje lidskou kontrolu.
