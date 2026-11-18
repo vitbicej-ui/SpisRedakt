@@ -95,6 +95,25 @@ def lookalike_emails(text):
         yield starts[found.start()], ends[found.end() - 1], found[0]
 
 
+DOTTED_BEFORE = re.compile(r"(?<![\w.+-])([\w+-]+(?:\.[\w+-]+)+)[ \t\n]{1,2}\Z")
+
+
+def extend_email(text, item):
+    """Join a dotted name just before an e-mail that OCR split ("jan.novak Q@example.test").
+
+    The e-mail then covers the name too when its own local part is one or two characters
+    or "mail" is written shortly before it. More is replaced rather than less.
+    """
+    start, end, kind, identity = item
+    before = DOTTED_BEFORE.search(text, max(0, start - 70), start)
+    if not before:
+        return item
+    local = text[start:end].split("@", 1)[0]
+    if len(local) <= 2 or MAIL_CUE.search(text, max(0, before.start() - 80), before.start()):
+        return before.start(1), end, kind, identity
+    return item
+
+
 def email_matches(text):
     """``COMPILED["EMAIL"].finditer(text)``, starting from each "@" instead of every word."""
     pattern, find, position = COMPILED["EMAIL"], text.find, 0
@@ -274,6 +293,7 @@ class Rules:
                 candidates.append((*match.span(group), KIND_OF.get(kind, kind), identity))
         for start, end, shown in lookalike_emails(text):
             candidates.append((start, end, "EMAIL", key(shown)))
+        candidates = [extend_email(text, item) if item[2] == "EMAIL" else item for item in candidates]
         candidates += self.numeric_candidates(text, candidates, ocr)
         candidates.sort(key=lambda item: (item[0], item[0] - item[1]))
         merged = []

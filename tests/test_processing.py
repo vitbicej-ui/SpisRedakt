@@ -2093,9 +2093,12 @@ class OcrAtSignTests(unittest.TestCase):
 
     def test_at_sign_variants_are_e_mails(self):
         for text in ("e-mail radoslava.ondrackova\n(A example.test, tel.", "jan.novak (a) firma.cz",
+                     "e-mail radoslava.ondrackova Q@example.test, tel.", "radoslava.ondrackova a@example.test",
                      "ilona.kucerova\n© example.test", "radoslava.ondrackova A example.test",
                      "e-mail radoslava.ondrackova Wexample.test, tel.", "e-mail radoslava.ondrackova\xa9Aexample.test"):
-            self.assertIn("[EMAIL-1]", Rules().replace(text, ocr=True)[0], text)
+            output = Rules().replace(text, ocr=True)[0]
+            self.assertIn("[EMAIL-1]", output, text)
+            self.assertNotIn("ondrackova", output, text)
 
     def test_ordinary_text_stays(self):
         for text in ("Smlouva (a příloha č. 2) platí.", "Viz bod (a) výše.", "Jan a Firma.cz",
