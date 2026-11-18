@@ -144,6 +144,30 @@ SCANNERS = {
 }
 
 
+# Spaces other than U+0020 (no-break, narrow, figure, thin ...) and invisible characters
+# (soft hyphen, zero-width, BOM). Word and PDF text layers use them inside names and numbers.
+SPACE_LIKE = {code: " " for code in (0x00A0, 0x1680, *range(0x2000, 0x200B), 0x202F, 0x205F, 0x3000)}
+INVISIBLE = {code: None for code in (0x00AD, 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF)}
+NORMALIZE = {**SPACE_LIKE, **INVISIBLE}
+UNUSUAL = re.compile("[" + "".join(map(chr, NORMALIZE)) + "]")
+
+
+def normalize_for_rules(text):
+    """Return ``(normalized, origin)``; ``origin[i]`` is the index in ``text`` of normalized char ``i``.
+
+    ``origin`` is None when the text has nothing to normalize (the common case).
+    """
+    if not UNUSUAL.search(text):
+        return text, None
+    chars, origin = [], []
+    for index, char in enumerate(text):
+        replacement = NORMALIZE.get(ord(char), char)
+        if replacement is not None:
+            chars.append(replacement)
+            origin.append(index)
+    return "".join(chars), origin
+
+
 @dataclass(frozen=True)
 class Finding:
     start: int
@@ -182,6 +206,22 @@ class Rules:
         self.custom = re.compile(r"(?<!\w)(?:" + "|".join(patterns) + r")(?!\w)", re.I) if patterns else None
 
     def find(self, text, contexts=True, ocr=False):
+        """Findings in ``text``; unusual spaces and invisible characters do not hide a value.
+
+        The rules run on a normalized copy (no-break and other spaces become a space, soft
+        hyphens and zero-width characters are dropped) and the spans are mapped back, so
+        "Jan\xa0Novák" or "850314\xad2010" are found and replaced in the original text.
+        """
+        normalized, origin = normalize_for_rules(text)
+        if origin is None:
+            return self._find(text, contexts, ocr)
+        mapped = []
+        for item in self._find(normalized, contexts, ocr):
+            start, end = origin[item.start], origin[item.end - 1] + 1
+            mapped.append(Finding(start, end, item.kind, item.identity))
+        return mapped
+
+    def _find(self, text, contexts=True, ocr=False):
         candidates = [(start, end, kind, key(identity))
                       for start, end, kind, identity in contextual_findings(
                           text, self.surnames, self.families, contexts, self.given_identities())]

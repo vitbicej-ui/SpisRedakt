@@ -899,10 +899,15 @@ def _words(text):
     return re.findall(r"\w+", text.casefold())
 
 
+# Fonts such as Arial share one glyph for the space and the no-break space and for the hyphen and
+# the soft hyphen; the PDF text layer then reports U+00A0 and U+00AD for what is drawn as " " and "-".
+PDF_LAYER = str.maketrans({"\u00a0": " ", "\u202f": " ", "\u2007": " ", "\u00ad": "-"})
+
+
 def _pdf_page(ctx, page):
     """Return (blocks, text seen for the Slovak-register check) of one page."""
     raw = [b for b in page.get_text("blocks", sort=True) if b[6] == 0]
-    layer = [(b[1], b[0], clean_ocr(b[4], text_layer=True)) for b in raw]
+    layer = [(b[1], b[0], clean_ocr(b[4].translate(PDF_LAYER), text_layer=True)) for b in raw]
     layer = [item for item in layer if item[2]]
     layer_text = "\n".join(item[2] for item in layer)
     if sum(c.isalpha() for c in layer_text) < 20 or "�" in layer_text:

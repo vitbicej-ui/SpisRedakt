@@ -687,7 +687,8 @@ def line_breaks(header):
 
 def column_kind(header):
     """Return the finding kind for a table column header, or None."""
-    text = line_breaks(header).strip(" :*").casefold()
+    from .rules import NORMALIZE
+    text = " ".join(line_breaks(str(header).translate(NORMALIZE)).split()).strip(" :*").casefold()
     for kind, pattern in COLUMN_HEADERS:
         if pattern.fullmatch(text):
             return kind

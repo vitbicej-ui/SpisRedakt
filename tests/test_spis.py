@@ -21,6 +21,7 @@ import pymupdf
 from anonymizer.batch import process_folders
 from anonymizer.leaks import KINDS, Value, layers, report, scan_texts, scan_tree
 import synthetic_spis as spis
+from anonymizer.extract import PDF_LAYER
 
 TESSDATA = os.environ.get("SPISREDAKT_TEST_TESSDATA")
 needs_ocr = unittest.skipUnless(TESSDATA, "Chybí testovací jazyková data.")
@@ -225,7 +226,8 @@ class GeneratorTests(unittest.TestCase):
         with pymupdf.open(stream=self.one("04_rozsudek_12C345-2026.pdf"), filetype="pdf") as pdf:
             self.assertGreaterEqual(len(pdf), 4)
             for number, page in enumerate(pdf, 1):
-                text = page.get_text()
+                # Arial on Windows reports drawn spaces and hyphens as U+00A0 and U+00AD.
+                text = page.get_text().translate(PDF_LAYER)
                 self.assertIn(spis.HEADER, text)
                 self.assertIn(f"strana {number} z {len(pdf)}", text)
         with pymupdf.open(stream=self.one("07_sken_podani_Ondrackova.pdf"), filetype="pdf") as pdf:
@@ -269,7 +271,7 @@ class GeneratorTests(unittest.TestCase):
         texts = {}
         for name in ("03_vyslech_Wolf.docx", "05_platebni_rozkaz.odt", "04_rozsudek_12C345-2026.pdf"):
             data = next(data for key, data in self.files.items() if key.endswith(name))
-            texts[name] = " ".join(" ".join(layer.split()) for layer in
+            texts[name] = " ".join(" ".join(layer.translate(PDF_LAYER).split()) for layer in
                                    layers_of_bytes(data, name))
             self.assertIn(" ".join(notice.split()), texts[name])
             self.assertIn("Shodu s prvopisem potvrzuje", texts[name])
@@ -485,8 +487,10 @@ class PerformanceTests(unittest.TestCase):
         script = Path(__file__).resolve().parents[1] / "scripts" / "benchmark_spis.py"
         done = subprocess.run([sys.executable, "-I", str(script), "--pages", "2", "--mb", "3", "--rows", "30",
                                "--tessdata", TESSDATA], capture_output=True, text=True, timeout=900,
-                              env=dict(os.environ, QT_QPA_PLATFORM="offscreen"))
-        self.assertEqual(done.returncode, 0, "Měřicí skript selhal.")
+                              encoding="utf-8", errors="replace",
+                              env=dict(os.environ, QT_QPA_PLATFORM="offscreen", PYTHONIOENCODING="utf-8"))
+        # Synthetic data only, so the error output may be shown.
+        self.assertEqual(done.returncode, 0, "Měřicí skript selhal:\n" + done.stderr[-3000:])
         self.assertIn("Čas celkem", done.stdout)
         self.assertIn("Špička paměti", done.stdout)
         self.assertEqual(done.stdout.count("Úniky: 0"), 2, "Měřicí skript našel únik nebo ho nezkontroloval.")

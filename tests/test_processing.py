@@ -2030,7 +2030,9 @@ class AdviceTests(unittest.TestCase):
             output.mkdir()
             (source / "broken.docx").write_bytes(b"invalid")
             (source / "ok.txt").write_text("Běžný text bez údajů.", encoding="utf-8")
-            selected = set(source.iterdir())
+            # The GUI passes resolved paths; on Windows the temporary folder may be a short 8.3 name.
+            source, output = source.resolve(), output.resolve()
+            selected = {path.resolve() for path in source.iterdir()}
             worker = BatchWorker(source, output, None, None, selected)
             lines = []
             worker.result.connect(lines.append)
@@ -2048,6 +2050,42 @@ class AdviceTests(unittest.TestCase):
         for line in lines:
             if line.startswith("    Rada: "):
                 self.assertNotIn("broken", line)
+
+
+class UnusualSpaceTests(unittest.TestCase):
+    """No-break spaces, soft hyphens and zero-width characters must not hide a value (synthetic data)."""
+
+    def test_values_with_unusual_spaces_are_replaced(self):
+        cases = {
+            "Žalobce\xa0Jan\xa0Novák,\xa0nar.\xa01.\xa02.\xa01980": ("Novák", "1980"),
+            "bytem\xa0Dlouhá\xa015,\xa0280\xa002\xa0Kolín": ("Dlouhá",),
+            "Tel.\u202f777\u2009123\u2009456": ("777",),
+            "RČ 850314\xad2010": ("850314", "2010"),
+            "na\xa0účet\xa01019283746/\xad0300": ("1019283746", "0300"),
+            "\ufeffkb@exam\u200bple.test": ("exam",),
+            "No\xadvák uvedl, že Jan Novák": ("No", "vák"),
+        }
+        for text, hidden in cases.items():
+            output = Rules().replace(text)[0]
+            for value in hidden:
+                self.assertNotIn(value, output, text)
+
+    def test_spans_map_back_to_the_original_text(self):
+        text = "Jan\xa0Novák a\xa0kb@example.test"
+        findings = Rules().find(text)
+        self.assertEqual([text[item.start:item.end] for item in findings], ["Jan\xa0Novák", "kb@example.test"])
+
+    def test_plain_text_is_unchanged(self):
+        text = "Žalobce Jan Novák, nar. 1. 2. 1980, tel. 777 123 456."
+        plain = Rules().replace(text)
+        spaced = Rules().replace(text.replace(" ", "\xa0"))
+        self.assertEqual(spaced[0].replace("\xa0", " "), plain[0])
+        self.assertEqual(spaced[1], plain[1])
+
+    def test_column_header_with_no_break_space(self):
+        from anonymizer.czech import column_kind
+        self.assertEqual(column_kind("Datum\xa0narození"), column_kind("Datum narození"))
+        self.assertEqual(column_kind("Rodné\xa0číslo"), "RC")
 
 
 class NumericRuleTests(unittest.TestCase):

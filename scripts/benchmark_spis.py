@@ -289,10 +289,12 @@ def run_worker(mode, source, target, tessdata, profile):
     environment = dict(os.environ, PYTHONPATH=os.pathsep.join([str(ROOT), str(ROOT / "tests")]),
                        QT_QPA_PLATFORM="offscreen")
     # -I ignores PYTHONPATH; the script inserts the paths itself.
-    done = subprocess.run(command, capture_output=True, text=True, env=environment)
+    done = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          env=dict(environment, PYTHONIOENCODING="utf-8"))
     if profile:
         sys.stderr.write(done.stderr)
     if done.returncode:
+        sys.stderr.write(done.stderr[-4000:])
         raise SystemExit(f"Měření '{mode}' selhalo (kód {done.returncode}).")
     return json.loads(done.stdout.strip().splitlines()[-1])
 
@@ -315,6 +317,10 @@ def show(label, result, output, leaks, leak_seconds):
 
 
 def main():
+    # Czech output must not fail on a Windows console or a captured pipe (cp1252).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--pages", type=int, default=300, help="počet stran skenů (výchozí 300)")
     parser.add_argument("--mb", type=float, default=200, help="přibližná velikost vstupního ZIPu v MB (výchozí 200)")
