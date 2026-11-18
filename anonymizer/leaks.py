@@ -270,6 +270,69 @@ def _compile(values):
     return jobs
 
 
+# -- numbers misread by OCR ----------------------------------------------------------
+
+_OCR_DIGITS = str.maketrans("OolISB", "001158")
+_TOKEN = re.compile(r"(?<![A-Za-z0-9])[0-9OolISB]*\d[0-9OolISB]*(?![A-Za-z0-9])")
+_JOINT = re.compile(r"[\s./\-]+")
+_FUZZY_KINDS = {"RC", "ICO", "UCET", "DOKLAD", "TELEFON"}
+FUZZY_MIN_DIGITS = 8
+
+
+def _variants(digits):
+    """``digits`` and the strings one digit away: one digit added, left out, replaced or two swapped.
+
+    The value itself is kept: its letter-for-digit spellings ("4O5") are not found by the exact patterns.
+    """
+    found = {digits}
+    for i in range(len(digits) + 1):
+        found.update(digits[:i] + c + digits[i:] for c in "0123456789")
+    for i in range(len(digits)):
+        found.add(digits[:i] + digits[i + 1:])
+        found.update(digits[:i] + c + digits[i + 1:] for c in "0123456789")
+    for i in range(len(digits) - 1):
+        found.add(digits[:i] + digits[i + 1] + digits[i] + digits[i + 2:])
+    return found
+
+
+@functools.lru_cache(maxsize=8)
+def _fuzzy(values):
+    """Variant digits -> (priority, kind) of the numeric values; plus the lengths a variant can have."""
+    table = {}
+    for value in dict.fromkeys(values):
+        if value.kind not in _FUZZY_KINDS:
+            continue
+        text = value.text.strip()
+        numbers = [_digits(text)[-9:] if value.kind == "TELEFON" else _digits(text)]
+        if value.kind == "UCET" and "/" in text:
+            numbers.append(_digits(text.split("/")[0]))
+        if value.kind == "DOKLAD" and re.search(r"[^\W\d_]", text):
+            continue
+        for digits in numbers:
+            if len(digits) >= FUZZY_MIN_DIGITS:
+                for variant in _variants(digits):
+                    table[variant] = min(table.get(variant, (99, "")), (PRIORITY.index(value.kind), value.kind))
+    return table, {len(variant) for variant in table}
+
+
+def _fuzzy_spans(plain, table, lengths):
+    """Spans of digit groups that read as a known number with one digit wrong (OCR letters count as digits)."""
+    longest = max(lengths)
+    tokens = [(found.start(), found.end(), found.group().translate(_OCR_DIGITS)) for found in _TOKEN.finditer(plain)]
+    for first in range(len(tokens)):
+        joined, singles = "", 0
+        for last in range(first, len(tokens)):
+            if last > first and not _JOINT.fullmatch(plain, tokens[last - 1][1], tokens[last][0]):
+                break
+            joined += tokens[last][2]
+            singles += len(tokens[last][2]) == 1
+            if len(joined) > longest:
+                break
+            if len(joined) in lengths and joined in table and singles <= 2:
+                priority, kind = table[joined]
+                yield priority, tokens[first][0], tokens[last][1], kind
+
+
 def _grouped(text, match):
     """Digits split into single-digit pieces (a list of indexes or cells) are not a number."""
     return sum(len(group) == 1 for group in re.findall(r"\d+", match.group())) <= 2
@@ -294,7 +357,9 @@ def _common_ok(text, match):
 
 def scan_texts(texts, values):
     """Count findings per kind in the given texts (overlapping findings count once)."""
-    jobs = _compile(tuple(values))
+    values = tuple(values)
+    jobs = _compile(values)
+    fuzzy = _fuzzy(values)
     found = collections.Counter()
     for text in texts:
         if not text:
@@ -311,6 +376,8 @@ def scan_texts(texts, values):
             for match in job.matches(plain):
                 if match.end() > match.start() and (job.check is None or job.check(plain, match)):
                     spans.append((job.priority, match.start(), match.end(), job.kind))
+        if fuzzy[1] and sum(c.isdigit() for c in plain) >= FUZZY_MIN_DIGITS - 1:
+            spans.extend(_fuzzy_spans(plain, *fuzzy))
         covered = bytearray(len(plain))
         for _, start, end, kind in sorted(spans):
             if not any(covered[start:end]):

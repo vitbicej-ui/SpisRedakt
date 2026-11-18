@@ -42,7 +42,7 @@ def run(mode, archive, root, values, tessdata):
         with zipfile.ZipFile(archive) as packed:
             packed.extractall(source)
     started = time.time()
-    results = list(process_folders(source, target, tessdata))
+    results = list(process_folders(source, target, tessdata, markdown=True))
     processed = time.time() - started
     started = time.time()
     counted = scan_tree(target, values, tessdata)

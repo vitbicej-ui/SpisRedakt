@@ -291,6 +291,11 @@ def mail(subject, sender, to, body, attachment=None, name="priloha.docx", html=N
     return message.as_bytes()
 
 
+# Numbers as OCR may misread them (an added digit, a letter for a digit): the exact rules do not find them.
+MISREAD = (f"Volejte {PEOPLE['hlavacek'].phone}0 kdykoli.",
+           f"Zavolejte na tel. {PEOPLE['kucerova'].phone.replace('0', 'O', 1)}.")
+
+
 # -- the case file -------------------------------------------------------------
 
 def build_spis(target_zip, scan_pages=2):
@@ -389,7 +394,8 @@ def build_spis(target_zip, scan_pages=2):
              f"e-mail {ondrackova.email}, rodné číslo {ondrackova.rc}."],
             ["Doplnění podání ze dne 12. 6. 2026",
              f"Svědkyně {kucerova.name} bydlí na adrese {kucerova.address}.",
-             f"Číslo účtu {ondrackova.account}, OP č.: {ondrackova.document}."]]
+             f"Číslo účtu {ondrackova.account}, OP č.: {ondrackova.document}.",
+             *MISREAD]]
     files["02_protokoly/07_sken_podani_Ondrackova.pdf"] = scan_pdf(scan[:scan_pages])
 
     # 8. TIFF scan.

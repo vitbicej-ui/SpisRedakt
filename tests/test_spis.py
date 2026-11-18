@@ -78,9 +78,11 @@ class DetectorTests(unittest.TestCase):
     def test_numbers_dates_contacts(self):
         for text, values, expected in (
             ("rč 850314/1237, 850314 1237, 8503141237, 850314-1237", [RC], {"RC": 4}),
-            ("rč 18503141237 a 85031412370", [RC], {}),
+            ("rč 18503141237 a 85031412370", [RC], {"RC": 2}),  # one digit too many: an OCR misreading
+            ("rč 18503141230 a 85031412390", [RC], {}),
             ("tel. +420 721 345 678, 721345678, 721.345.678, 00420 721 345 678", [PHONE], {"TELEFON": 4}),
-            ("tel. 7213456789", [PHONE], {}),
+            ("tel. 7213456789", [PHONE], {"TELEFON": 1}),
+            ("tel. 7213456790", [PHONE], {}),
             ("1. 2. 1980, 1.2.1980, 01.02.1980, 1980-02-01, 1. února 1980, 1 ÚNORA 1980", [BIRTH], {"NAROZENI": 6}),
             ("11. 2. 1980 a 1. 2. 1981", [BIRTH], {}),
             ("tadeas.wolf@example.test, TADEAS.WOLF@EXAMPLE.TEST, tadeas.wolf@jiny.test", [MAIL], {"EMAIL": 3}),
@@ -92,6 +94,24 @@ class DetectorTests(unittest.TestCase):
         ):
             with self.subTest(kind=values[0].kind, size=len(text)):
                 self.check(text, values, expected)
+
+    def test_numbers_misread_by_ocr_are_leaks(self):
+        """A value with one digit added, left out or replaced (also by an OCR letter) is reported."""
+        for text, values, expected in (
+            ("tel. 721 345 6780", [PHONE], {"TELEFON": 1}),
+            ("tel. 721 345 67", [PHONE], {"TELEFON": 1}),
+            ("tel. 721 345 679", [PHONE], {"TELEFON": 1}),
+            ("tel. 721 34S 678, 721 l45 678", [PHONE], {"TELEFON": 2}),
+            ("604 22l 33O", [Value("TELEFON", "604 221 330")], {"TELEFON": 1}),
+            ("rč 850314/12370, 850314/123, 850314/1238", [RC], {"RC": 3}),
+            ("účet 1234567890/0800", [ACCOUNT], {"UCET": 1}),
+            ("OP 2045169730, IČO 1234567", [PAPER, COMPANY], {"DOKLAD": 1, "ICO": 1}),
+        ):
+            with self.subTest(text=len(text), kind=values[0].kind):
+                self.check(text, values, expected)
+        # Not a leak: two edits, an unrelated number, single digits of a list.
+        self.check("tel. 722 345 6790, 721 345 6, 7213 1456 79", [PHONE], {})
+        self.check("1 2 7 2 1 3 4 5 6 7 8", [PHONE], {})
 
     def test_negative_cases(self):
         self.check("Byl to malý rozdíl.", [MALY], {})
@@ -293,10 +313,16 @@ class WholePathTests(unittest.TestCase):
                 else:
                     with zipfile.ZipFile(archive) as packed:
                         packed.extractall(source)
-                results = list(process_folders(source, target, TESSDATA))
+                results = list(process_folders(source, target, TESSDATA, markdown=True))
                 released = [result for result in results if result[1] is not None]
                 if mode == "batch":
                     self.assertTrue(released, "Dávka nevydala žádný soubor.")
+                markdown = next((path for _, path, _ in results if path is not None and path.suffix == ".md"), None)
+                self.assertIsNotNone(markdown, "Markdown nebyl vydán.")
+                text = markdown.read_text(encoding="utf-8")
+                # The misread numbers of the scanned page are gone from the Markdown (and from the control copy below).
+                self.assertNotIn("3640", text.replace(" ", ""))
+                self.assertNotIn("4O5", text)
                 counted = scan_tree(target, values, TESSDATA)
                 totals[mode] = counted
                 print(f"\n[{mode}] vydáno {len(released)} z {len(results)}; {report(counted)}")

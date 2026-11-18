@@ -2050,5 +2050,108 @@ class AdviceTests(unittest.TestCase):
                 self.assertNotIn("broken", line)
 
 
+class NumericRuleTests(unittest.TestCase):
+    """Numbers after a cue word (any text) and long digit groups in OCR text (synthetic values only)."""
+
+    @staticmethod
+    def replaced(text, ocr=False):
+        return Rules().replace(text, ocr)[0]
+
+    def test_cue_word_number_is_replaced_in_any_text(self):
+        for text, pieces in (
+            ("tel.: 732 123 1609", ("732", "1609", "123")),
+            ("účet č. 12345678901/0800", ("12345678901", "0800", "1234567")),
+            ("RČ 800101/12345", ("800101", "12345")),
+            ("OP č. AB12345B", ("AB12345B", "12345")),
+            ("tel. 732 l23 l69", ("732", "l23", "l69")),
+            ("mobil: +420 732 123 4567.", ("732", "4567")),
+            ("č.ú. 19-2000123456 / 0100", ("2000123456", "0100")),
+            ("rodné číslo: 8001O1/1234", ("8001O1", "1234")),
+            ("IČO 1234567 89", ("1234567", "89")),
+            ("pas: 12345678", ("12345678",)),
+        ):
+            for ocr in (False, True):
+                with self.subTest(text=text, ocr=ocr):
+                    result = self.replaced(text, ocr)
+                    self.assertRegex(result, r"\[[A-Z_]+-\d+\]")
+                    stripped = re.sub(r"\[[A-Z_]+-\d+\]", "", result)
+                    for piece in pieces:
+                        self.assertNotIn(piece, stripped)
+
+    def test_kinds_follow_the_cue(self):
+        for text, kind in (("tel. 732 123 1609", "TELEFON"), ("fax: 732 123 1609", "TELEFON"),
+                           ("bankovní spojení: 12345678901/0800", "UCET"), ("RČ 800101/12345", "RC"),
+                           ("doklad č. 12345678", "DOKLAD"), ("IČ: 123456789", "ICO"), ("DIČ 1234567890", "DIC")):
+            with self.subTest(kind=kind):
+                self.assertIn(f"[{kind}-1]", self.replaced(text))
+
+    def test_birth_date_only_when_the_exact_rule_failed(self):
+        self.assertEqual(self.replaced("Datum narození: 12. 5. 1980"), "Datum narození: [NAROZENI-1]")
+        self.assertIn("[NAROZENI-1]", self.replaced("nar. 12. 5. 19800"))
+        self.assertEqual(self.replaced("nar. 5. 80"), "nar. 5. 80")
+
+    def test_long_group_in_ocr_text_only(self):
+        text = "Volejte 732 123 1609 kdykoli"
+        self.assertEqual(self.replaced(text, True), "Volejte [CISLO-1] kdykoli")
+        self.assertEqual(self.replaced(text, False), text)
+        for number in ("800101/12345", "12345678901/0800", "732123160912", "+420 732 123 1609"):
+            with self.subTest(size=len(number)):
+                self.assertEqual(self.replaced(f"Číslo {number} je v textu.", True), "Číslo [CISLO-1] je v textu.")
+                self.assertEqual(self.replaced(f"Číslo {number} je v textu.", False), f"Číslo {number} je v textu.")
+
+    def test_long_group_with_ocr_letters(self):
+        for text in ("Volejte 604 22l 33O kdykoli", "Volejte 604 221 33O kdykoli", "Volejte 6O4 221 330 kdykoli",
+                     "Volejte I23 456 789O kdykoli"):
+            with self.subTest(text=text):
+                self.assertEqual(self.replaced(text, True), "Volejte [CISLO-1] kdykoli")
+                self.assertEqual(self.replaced(text, False), text)
+        for text in ("Sb. 123", "zákon č. 89/2012 Sb.", "OSB 12", "IBAN je číslo"):
+            with self.subTest(text=text):
+                self.assertEqual(self.replaced(text, True), self.replaced(text, False))
+        self.assertEqual(self.replaced("Olomouc 123 456 789 je město", True), "Olomouc [CISLO-1] je město")
+        self.assertNotIn("CISLO", self.replaced("Olomouc 123 456 78", True))
+
+    def test_useful_numbers_stay(self):
+        for text in ("částka 1 234 567 890 Kč", "1 234 567,- Kč", "cena 123 456 789,50 Kč", "celkem 12 345 678 901 EUR",
+                     "sp. zn. 12 C 34/2020", "č. j. 5 T 7/2019-11", "č. j. 12345/2020-11", "zákon č. 89/2012 Sb.",
+                     "§ 1234", "§ 123456789", "dne 1. 2. 2020", "od 12. 3. 2020 do 15. 3. 2020 - 2020-01-15",
+                     "strana 3 z 12", "srov. 25 Cdo 1234/2019", "podle čl. 1234567890", "vyhl. č. 1234567890 Sb."):
+            with self.subTest(text=text):
+                result = self.replaced(text, True)
+                self.assertNotIn("CISLO", result)
+                self.assertNotIn("[NAROZENI", result)
+        self.assertEqual(self.replaced("na účet soudu 1 234 567 Kč"), "na účet soudu 1 234 567 Kč")
+        self.assertEqual(self.replaced("Tel. Novák volal. Číslo 1234567 je jiné."),
+                         "Tel. Novák volal. Číslo 1234567 je jiné.")
+
+    def test_exact_rules_keep_precedence_and_numbering(self):
+        text = "tel. 721 345 678, RČ 850314/1237, účet 123456789/0800, IČO 12345678, sp. zn. 12 C 34/2020"
+        expected = "tel. [TELEFON-1], RČ [RC-1], účet [UCET-1], IČO [ICO-1], sp. zn. [SPIS-1]"
+        self.assertEqual(self.replaced(text), expected)
+        self.assertEqual(self.replaced(text, True), expected)
+        self.assertEqual(Rules().replace("tel. 732 123 1609 a 721 345 678")[0], "tel. [TELEFON-2] a [TELEFON-1]")
+
+    def test_label_is_shared_by_equal_numbers(self):
+        rules = Rules()
+        first = rules.replace("tel. 732 123 1609", True)[0]
+        again = rules.replace("tel. 7321231609", True)[0]
+        self.assertEqual((first, again), ("tel. [TELEFON-1]", "tel. [TELEFON-1]"))
+
+    def test_markdown_marks_long_numbers_of_scans_only(self):
+        from anonymizer import extract, markdown
+
+        def document(ocr):
+            block = extract.Block("p", text="Volejte 732 123 1609 kdykoli", ocr=ocr)
+            return extract.Document(1, "PDF", [extract.Page(1, [block])], [], [])
+
+        for ocr, expected in ((True, "Volejte [CI1] kdykoli"), (False, "Volejte 732 123 1609 kdykoli")):
+            with self.subTest(ocr=ocr):
+                rules, documents = Rules(), [document(ocr)]
+                markdown.collect(documents, rules)
+                output = markdown.render(documents, rules)
+                self.assertIn(expected, output.text)
+                self.assertEqual("[CI…] dlouhé číslo ze skenu, možný údaj" in output.text, ocr)
+
+
 if __name__ == "__main__":
     unittest.main()

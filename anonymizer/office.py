@@ -531,7 +531,7 @@ def redact_image(data, extension, rules, tessdata):
         # OCR cannot distinguish a decorative image from unreadable sensitive text.
         pixmap.clear_with(0)
     else:
-        redact_geometry(pixmap, rules, content, geometry, transform)
+        redact_geometry(pixmap, rules, content, geometry, transform, True)
     return pixmap.tobytes("png" if extension == "png" else "jpeg", jpg_quality=100)
 
 

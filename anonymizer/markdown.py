@@ -21,10 +21,11 @@ WARNING = ("Automatická anonymizace nezaručuje odstranění všech osobních �
 
 SHORT = {"OSOBA": "O", "ADRESA": "A", "RC": "RC", "NAROZENI": "N", "TELEFON": "T", "EMAIL": "E", "UCET": "U",
          "IBAN": "IB", "DOKLAD": "DK", "ICO": "IC", "DIC": "DI", "SPIS": "SZ", "ORGANIZACE": "F",
-         "OSOBNI_UDAJ": "X", "VLASTNI": "V", "PRIJMENI": "O"}
+         "OSOBNI_UDAJ": "X", "VLASTNI": "V", "PRIJMENI": "O", "CISLO": "CI"}
 LEGEND = (("O", "osoba"), ("A", "adresa"), ("RC", "rodné číslo"), ("N", "datum narození"), ("T", "telefon"),
           ("E", "e-mail"), ("U", "účet"), ("IB", "IBAN"), ("DK", "doklad"), ("IC", "IČO"), ("DI", "DIČ"),
-          ("SZ", "spisová značka"), ("F", "organizace"), ("X", "jiný osobní údaj"), ("V", "vlastní údaj"))
+          ("SZ", "spisová značka"), ("F", "organizace"), ("X", "jiný osobní údaj"), ("V", "vlastní údaj"),
+          ("CI", "dlouhé číslo ze skenu, možný údaj"))
 LONG_LABEL = re.compile(r"\[([A-Z_]+)-(\d+)\]")
 
 QUOTE_MARKER = re.compile(
@@ -212,18 +213,18 @@ class _Anonymizer:
         self.collecting = collecting
         self.collect = getattr(rules, "collect", None)
 
-    def text(self, value):
+    def text(self, value, ocr=False):
         if not value:
             return value
         if self.collecting:
             if self.collect is not None:
-                self.collect(value)
+                self.collect(value, ocr)
             else:
-                self.rules.replace(value)
+                self.rules.replace(value, ocr)
             return value
-        return self.rules.replace(value)[0]
+        return self.rules.replace(value, ocr)[0]
 
-    def table(self, rows):
+    def table(self, rows, ocr=False):
         rows = [["" if cell is None else str(cell) for cell in row] for row in rows or ()]
         plan = czech.plan_table([list(enumerate(row)) for row in rows])
         result = []
@@ -231,7 +232,7 @@ class _Anonymizer:
             out = []
             for c, cell in enumerate(row):
                 value = self.rules.cell(plan[r, c], cell) if (r, c) in plan else None
-                out.append(value if value else self.text(cell))
+                out.append(value if value else self.text(cell, ocr))
             result.append(out)
         return rows, plan, result
 
@@ -391,18 +392,18 @@ def _process(doc, rules, collecting):
         entries = []
         for kind, text, ocr, rows in items:
             if kind == "table":
-                raw_rows, plan, done = anon.table(rows)
+                raw_rows, plan, done = anon.table(rows, ocr)
                 compact, naive = _table_entries(raw_rows, plan, done)
                 if compact or naive.strip("| -\n"):
                     entries.append(_Entry("table", compact, naive))
             elif kind == "image":
                 if text.strip():
-                    value = anon.text(text.strip())
+                    value = anon.text(text.strip(), ocr)
                     entries.append(_Entry("imgocr", f"[OBRÁZEK, text OCR:] {value}", f"[OBRÁZEK, text OCR:] {value}"))
                 else:
                     entries.append(_Entry("image", "[OBRÁZEK VYNECHÁN]", "[OBRÁZEK VYNECHÁN]"))
             elif text.strip():
-                value = anon.text(text.strip())
+                value = anon.text(text.strip(), ocr)
                 if kind == "note":
                     value = "[pozn.] " + value
                 entries.append(_Entry({"mailheader": "mail", "note": "note"}.get(kind, "p"), value, value))

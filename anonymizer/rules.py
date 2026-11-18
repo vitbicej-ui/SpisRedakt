@@ -2,7 +2,8 @@ import re
 import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from .czech import (GIVEN, GIVEN_FORMS, INITIAL_WORD, LABEL, anchored, cls, contextual_findings,
+from . import numbers
+from .czech import (CASE, GIVEN, GIVEN_FORMS, INITIAL_WORD, LABEL, anchored, cls, contextual_findings,
                     identity_family, structured_identity, surface_surname)
 
 
@@ -180,7 +181,7 @@ class Rules:
             patterns.append("(" + r"[ \t\n]+".join(re.escape(word) for word in variant.split()) + ")")
         self.custom = re.compile(r"(?<!\w)(?:" + "|".join(patterns) + r")(?!\w)", re.I) if patterns else None
 
-    def find(self, text, contexts=True):
+    def find(self, text, contexts=True, ocr=False):
         candidates = [(start, end, kind, key(identity))
                       for start, end, kind, identity in contextual_findings(
                           text, self.surnames, self.families, contexts, self.given_identities())]
@@ -205,6 +206,7 @@ class Rules:
                 candidates.append((*match.span(group), KIND_OF.get(kind, kind), identity))
         for start, end, shown in lookalike_emails(text):
             candidates.append((start, end, "EMAIL", key(shown)))
+        candidates += self.numeric_candidates(text, candidates, ocr)
         candidates.sort(key=lambda item: (item[0], item[0] - item[1]))
         merged = []
         for item in candidates:
@@ -218,6 +220,23 @@ class Rules:
         for start, end, kind, _ in merged:
             self.remember(kind, text[start:end])
         return [Finding(*item) for item in merged]
+
+    @staticmethod
+    def numeric_candidates(text, candidates, ocr):
+        """Numbers after a cue word and (in OCR text) long digit groups that the exact rules did not take."""
+        found = []
+        for start, end, kind in numbers.cue_numbers(text):
+            if not any(item[0] <= start and end <= item[1] for item in candidates):
+                found.append((start, end, kind, numbers.identity(text[start:end])))
+        if ocr:
+            # Case numbers and citations stay: they identify a public decision or the case, not a person.
+            skip = [match.span(1) for match in CASE.finditer(text)]
+            skip += [item[:2] for item in candidates if item[2] == "SPIS"]
+            skip += [item[:2] for item in found]
+            for start, end in numbers.long_numbers(text, skip):
+                if not any(item[0] <= start and end <= item[1] for item in candidates):
+                    found.append((start, end, "CISLO", numbers.identity(text[start:end])))
+        return found
 
     def remember(self, kind, surface):
         if "[" in surface and LABEL.search(surface):
@@ -343,21 +362,21 @@ class Rules:
             self.register_given(item.identity, self.labels[identity])
         return self.labels[identity]
 
-    def collect(self, text):
+    def collect(self, text, ocr=False):
         """First phase of a two-phase run over a whole case (all its texts).
 
         Registers the persons and other labels found in ``text`` and returns nothing.
         Call it on every text of the case, then ``replace`` each text: a surname that
         is introduced only in a later document is then replaced in an earlier one too.
         """
-        self.replace(text)
+        self.replace(text, ocr)
 
-    def replace(self, text):
+    def replace(self, text, ocr=False):
         total = 0
         # A replacement can expose a new match next to a label; repeat until stable.
         for turn in range(3):
             # Persons named by a context ("pan X") are found in the first pass; later passes only repeat the scan.
-            findings = self.find(text, turn == 0)
+            findings = self.find(text, turn == 0, ocr)
             if not findings:
                 break
             total += len(findings)

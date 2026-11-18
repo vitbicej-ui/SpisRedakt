@@ -146,14 +146,14 @@ def joined_view(text):
     return view, indexes
 
 
-def redact_geometry(pixmap, rules, text, geometry, transform):
+def redact_geometry(pixmap, rules, text, geometry, transform, ocr=False):
     redacted = []
-    spans = [(item.start, item.end) for item in rules.find(text)]
+    spans = [(item.start, item.end) for item in rules.find(text, ocr=ocr)]
     if "\n" in text:
         # A name split by a hyphen at a line end, or a value that continues on the next line, is invisible
         # to a search line by line: look again at the joined text and black out the boxes of every part.
         view, indexes = joined_view(text)
-        spans += [(indexes[item.start], indexes[item.end - 1] + 1) for item in rules.find(view)]
+        spans += [(indexes[item.start], indexes[item.end - 1] + 1) for item in rules.find(view, ocr=ocr)]
     covered = set()
     for start, end in sorted(spans):
         if (start, end) in covered:
@@ -232,22 +232,22 @@ def redact_pdf(source, destination, rules, tessdata=None, force_ocr=False):
             raw = page.get_text("rawdict", flags=pdf.TEXTFLAGS_RAWDICT & ~pdf.TEXT_PRESERVE_IMAGES)
             text, boxes = text_geometry(raw)
             matrix = page.rotation_matrix * scale
-            sources = [(text, boxes, matrix)]
+            sources = [(text, boxes, matrix, False)]
             blacked = False
             if force_ocr or page.get_image_info() or page.get_drawings() or not text.strip() or "\ufffd" in text:
                 recognized = recognize_image(pixmap, tessdata)
                 if recognized[0].strip():
-                    sources.append(recognized)
+                    sources.append((*recognized, True))
                 elif not text.strip() and not blank(page):
                     # A photo, signature or unreadable scan: OCR cannot rule out
                     # personal data, so the whole page is blacked out.
                     pixmap.clear_with(0)
                     blacked = True
-            if slovak_register(" ".join(content for content, _, _ in sources)):
+            if slovak_register(" ".join(source[0] for source in sources)):
                 raise ValueError("Slovenský výpis nebo formulář nebyl vydán: rozložení osobních polí zatím nelze spolehlivě ověřit.")
             redacted = [pixmap.irect] if blacked else []
-            for content, geometry, transform in sources:
-                redacted.extend(redact_geometry(pixmap, rules, content, geometry, transform))
+            for content, geometry, transform, ocr in sources:
+                redacted.extend(redact_geometry(pixmap, rules, content, geometry, transform, ocr))
             target = output.new_page(width=page.rect.width, height=page.rect.height)
             target.insert_image(target.rect, pixmap=pixmap, keep_proportion=False)
             expected.append(redacted)
