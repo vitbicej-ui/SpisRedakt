@@ -118,3 +118,10 @@ Pořadí podle sekce „Produkce“ v BACKLOG.md. Commity:
 | `278f156` | `anonymizer/markdown.py`: dvoufázové štítkování, krátké štítky, legenda, obsah, deterministické úspory. |
 
 Ověřeno orchestrátorem mimo testy vývojářů: ruční příklady příjmení (pády, rody, verzálky, bez diakritiky, „Malý rozdíl“, soud v Kolíně); detekce záhlaví ztrácela větu s číslem strany – vráceno a opraveno.
+
+## 10. Běh 18. 11. 2026 (denní běh)
+
+- `af3e40f`: měřicí skript `scripts/benchmark_spis.py`, proudové zpracování položek kontrolního ZIPu, cache `given_identities`, rychlé začernění, předfiltr detektoru úniků. Plný syntetický spis (200 MB, 300 stran skenů, 107 dokumentů) zpracuje Markdown za 4 min se špičkou 475 MB, odhad tokenů klesl z 261 tis. na 170 tis.
+- Předfiltr v `leaks.py` (detektor slouží i jako kontrola před vydáním Markdownu) orchestrátor nezávisle ověřil diferenčním porovnáním se starou verzí: 20 000 náhodných textů se zkomoleninami, 0 rozdílů.
+- Nové riziko: chybně přečtené číslo z OCR projde i do Markdownu (viz backlog „Chybně přečtená čísla z OCR“).
+- Testy: 243, OK. `check_outputs.py` OK. `leak_report.py`: 0 úniků.
