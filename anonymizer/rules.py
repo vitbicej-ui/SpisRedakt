@@ -128,6 +128,33 @@ def mail_after_cue(text):
         yield start, end
 
 
+MAIL_TAIL = re.compile(r"[^,;\n]{1,60}")
+LABEL_ANYWHERE = re.compile(r"\[[A-Z_]+-\d+\]")
+# What OCR leaves of "@": a symbol, a bracket or a quote somewhere in the address.
+AT_REMAINS = re.compile(r"[©®@(\[{\"«»„“”]")
+
+
+def garbled_mail_after_cue(text, candidates):
+    """OCR text only: after "e-mail", the text up to the next comma, semicolon or line end.
+
+    Used when no address was recognised there (a rotated or blurred scan can read
+    "jana.novak@example.test" as "1 ona novak(Dora ©1957"); a name may hide in it.
+    """
+    for cue in MAIL_WORD.finditer(text):
+        tail = MAIL_TAIL.match(text, cue.end())
+        if (not tail or LABEL_ANYWHERE.match(tail.group().lstrip()) or not AT_REMAINS.search(tail.group())
+                or sum(char.isalnum() for char in LABEL_ANYWHERE.sub("", tail.group())) < 3):
+            continue
+        start, end = tail.start(), tail.end()
+        if len(tail.group()) == 60 and " " in tail.group():
+            end = start + tail.group().rstrip().rfind(" ")
+        if end <= start:
+            continue
+        if any(item[2] == "EMAIL" and item[0] < end and start < item[1] for item in candidates):
+            continue
+        yield start, end
+
+
 DOTTED_BEFORE = re.compile(r"(?<![\w.+-])([\w+-]+(?:\.[\w+-]+)+)[ \t\n]{1,2}\Z")
 
 
@@ -374,6 +401,9 @@ class Rules:
             candidates.append((start, end, "EMAIL", key(shown)))
         candidates = [extend_email(text, item) if item[2] == "EMAIL" else item for item in candidates]
         candidates += [(start, end, "EMAIL", key(text[start:end])) for start, end in mail_after_cue(text)]
+        if ocr:
+            candidates += [(start, end, "EMAIL", key(text[start:end]))
+                           for start, end in garbled_mail_after_cue(text, candidates)]
         candidates += self.numeric_candidates(text, candidates, ocr)
         candidates.sort(key=lambda item: (item[0], item[0] - item[1]))
         merged = []

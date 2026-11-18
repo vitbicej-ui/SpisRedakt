@@ -2102,7 +2102,8 @@ class OcrAtSignTests(unittest.TestCase):
 
     def test_address_after_the_e_mail_cue_is_replaced_whatever_the_at_sign_looks_like(self):
         for text in ("tel. 1, e-mail ilona.kucerova(\xa9Aexample.test, rodné", "e-mail radoslava.ondrackova \xa9 example. test, rodné",
-                     "E-mail: radoslava.ondrackova (Y example.test\nrodné", "e\xadmail \"adoslava.ondrackova example test rodné"):
+                     "E-mail: radoslava.ondrackova (Y example.test\nrodné", "e\xadmail \"adoslava.ondrackova example test rodné",
+                     "tel. 1, e\xadmail 1 ona ondrackova(Dora \xa91957 radné číslo, č. ú."):
             output = Rules().replace(text, ocr=True)[0]
             self.assertIn("[EMAIL-1]", output, ascii(text))
             self.assertNotIn("ondrackova", output, ascii(text))
