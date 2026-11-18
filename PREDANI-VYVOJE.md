@@ -126,3 +126,15 @@ Ověřeno orchestrátorem mimo testy vývojářů: ruční příklady příjmen�
 - Nové riziko: chybně přečtené číslo z OCR projde i do Markdownu (viz backlog „Chybně přečtená čísla z OCR“).
 - Testy: 243, OK. `check_outputs.py` OK. `leak_report.py`: 0 úniků.
 - `d9703fa`: chybně přečtená čísla z OCR (`anonymizer/numbers.py`). Orchestrátor při kontrole našel, že dlouhé číslo ve skenu se zaměněnými písmeny (`604 22l 33O`) zůstávalo, vráceno a opraveno. Kontrola před vydáním teď odmítne i výstup s variantou známé hodnoty o jednu číslici; u spisu to může vést k nevydání celého Markdownu (bezpečné, ale je třeba to sledovat). Testy: 253, OK; `leak_report.py` 0 úniků i v Markdownu.
+
+## 11. Oprava Windows CI (18. 11. 2026)
+
+- Windows CI na větvi `claude/orchestrace-vyvoje` selhávalo od 17. 11. dopoledne. Orchestrátor po pushi nekontroloval výsledek CI. Kontrola je nově povinný krok v `.claude/agents/orchestrator.md`.
+- Příčiny a opravy:
+  - Test rad v GUI používal nerozvinuté cesty (na Windows krátké názvy 8.3). Opraveno v testu.
+  - **Skutečné úniky na všech platformách:** pravidla nepoznala údaje zapsané s nezlomitelnou mezerou, měkkým spojovníkem nebo neviditelnými znaky („Jan\xa0Novák“, „850314\xad2010“). `Rules.find` teď hledá v normalizované kopii a pozice převádí zpět (`4565726`).
+  - Textová vrstva PDF s písmem Arial vrací místo mezery a spojovníku U+00A0 a U+00AD. Extrakce je převádí (`PDF_LAYER`).
+  - OCR na Windows čte „@“ v e-mailu na skenu jako „(A“, „©A“, „ W“ nebo jako znak navíc před „@“. Pravidla tyto podoby poznají (`a816e4d`, `7de407d` a následující commit).
+  - Měřicí skript padal na kódování konzole cp1252. Výstup je nově v UTF-8.
+- Ověřování bez Windows: simulace (podvržené `get_text` s U+00A0/U+00AD a písmo Liberation Sans místo DejaVu) a diagnostické výpisy syntetických dat v testech při selhání.
+- Výsledek: Windows CI zelené (259 testů, sestavení a ověření balíčku).
