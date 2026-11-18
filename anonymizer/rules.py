@@ -41,19 +41,34 @@ STRIPPED = {"IBAN", "RC", "RC_BARE", "RC_CTX", "TELEFON", "UCET", "NAROZENI"}
 KIND_OF = {"RC_BARE": "RC", "RC_CTX": "RC"}
 NON_DIGIT = re.compile(r"\D")
 # OCR often reads "@" as "©" or "®" (and may add a stray letter after it); "(at)" is a common spelling.
-AT_LOOKALIKE = re.compile(r"(?<=[\w.+-])(?:[©®]|\((?:at|AT)\)|\[(?:at|AT)\])[ĎďĚě ]?(?=[\w-])")
+# "@" as OCR reads it: ©, ®, "(at)", "[at]", or "(A"/"(a"/"(@" with blanks or a line break around it
+# (Arial on a scan: "novak\n(A example.test"). The domain after it must still look like one.
+AT_LOOKALIKE = re.compile(
+    r"(?<=[\w.+-])(?:[©®]|\((?:at|AT)\)|\[(?:at|AT)\])[ĎďĚě ]?(?=[\w-])"
+    r"|(?<=[\w.+-])[ \t]?\n?[ \t]?(?:\([Aa@]\)?|[@©®])[ \t]?\n?[ \t]?(?=[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b)"
+    # A lone "A" between blanks counts only when the part before it has a dot (checked below).
+    r"|(?<=[\w+-])[ \t\n]{1,2}(?P<lone>[Aa])[ \t\n]{1,2}(?=[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b)")
+
+
+FILE_SUFFIXES = {"pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf", "txt",
+                 "csv", "zip", "jpg", "jpeg", "png", "tif", "tiff", "bmp", "eml", "msg", "xml", "json"}
 
 
 def lookalike_emails(text):
     """E-mail matches in ``text`` with "@" lookalikes read as "@". Yields (start, end) in ``text``."""
-    if not ("©" in text or "®" in text or "(at)" in text.lower() or "[at]" in text.lower()):
+    lowered = text.lower()
+    if not ("©" in text or "®" in text or "(at)" in lowered or "[at]" in lowered or "(a" in lowered
+            or "(@" in text or " @" in text or "@ " in text or "\n@" in text or "@\n" in text
+            or " a " in lowered or "\na " in lowered or " a\n" in lowered):
         return
-    view, starts, ends, position = [], [], [], 0
+    view, starts, ends, position, lone = [], [], [], 0, set()
     for match in AT_LOOKALIKE.finditer(text):
         chunk = text[position:match.start()]
         view.append(chunk)
         starts += range(position, match.start())
         ends += range(position + 1, match.start() + 1)
+        if match.group("lone"):
+            lone.add(len(starts))  # position of this "@" in the view
         view.append("@")
         starts.append(match.start())
         ends.append(match.end())
@@ -64,6 +79,10 @@ def lookalike_emails(text):
     starts += range(position, len(text))
     ends += range(position + 1, len(text) + 1)
     for found in email_matches("".join(view)):
+        at = found.start() + found[0].index("@")
+        if at in lone and ("." not in found[0][:found[0].index("@")]
+                           or found[0].rsplit(".", 1)[-1].lower() in FILE_SUFFIXES):
+            continue
         yield starts[found.start()], ends[found.end() - 1], found[0]
 
 
