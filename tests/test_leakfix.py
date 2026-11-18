@@ -146,7 +146,7 @@ class ScanTests(unittest.TestCase):
         counted = self.leaks(data, [Value("JMENO", "Radoslava Ondráčková"), Value("PRIJMENI", "Ondráčková"),
                                     Value("EMAIL", "radoslava.ondrackova@example.test"),
                                     Value("TELEFON", "733 456 789")])
-        self.assertEqual(sum(counted.values()), 0, f"{dict(counted)} {self.seen!r}")
+        self.assertEqual(sum(counted.values()), 0, f"{dict(counted)} {ascii(self.seen)}")
 
     def test_text_layer_phone_split_over_two_lines(self):
         data = spis.text_pdf(["Plátce Karel Hájek, IČO: 60193531, účet 35-1122334455/0800, tel. 774 220 861."])
