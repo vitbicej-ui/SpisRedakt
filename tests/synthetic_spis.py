@@ -6,7 +6,9 @@ every personal value that was put into it, so a detector can look for them
 in the released output.
 """
 import datetime
+import contextlib
 import io
+import os
 import sys
 import tempfile
 import zipfile
@@ -31,6 +33,21 @@ HEADER = f"{COURT}, sp. zn. {CASE}"
 FONTS = ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
          "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
          "C:/Windows/Fonts/arial.ttf", "/System/Library/Fonts/Supplemental/Arial.ttf")
+_LIB, _DEJAVU, _WIN = "/usr/share/fonts/truetype/liberation/", "/usr/share/fonts/truetype/dejavu/", "C:/Windows/Fonts/"
+# Named typefaces for tests (``SPISREDAKT_TEST_FONT`` or ``use_font``): the first existing file wins, so the
+# same test runs on Linux (Liberation, DejaVu) and on Windows (Arial, Times New Roman). Liberation Sans has the
+# shapes (and metrics) of Arial.
+FACES = {
+    "dejavu": (_DEJAVU + "DejaVuSans.ttf",),
+    "liberation": (_LIB + "LiberationSans-Regular.ttf", _WIN + "arial.ttf"),
+    "arial": (_WIN + "arial.ttf", "/System/Library/Fonts/Supplemental/Arial.ttf", _LIB + "LiberationSans-Regular.ttf"),
+    "sans-bold": (_LIB + "LiberationSans-Bold.ttf", _WIN + "arialbd.ttf", _DEJAVU + "DejaVuSans-Bold.ttf"),
+    "sans-italic": (_LIB + "LiberationSans-Italic.ttf", _WIN + "ariali.ttf"),
+    "serif": (_LIB + "LiberationSerif-Regular.ttf", _DEJAVU + "DejaVuSerif.ttf", _WIN + "times.ttf"),
+    "serif-bold": (_LIB + "LiberationSerif-Bold.ttf", _DEJAVU + "DejaVuSerif-Bold.ttf", _WIN + "timesbd.ttf"),
+    "serif-italic": (_LIB + "LiberationSerif-Italic.ttf", _WIN + "timesi.ttf"),
+}
+_chosen = []
 NOTICE = ("Poučení: Proti tomuto rozhodnutí je možno podat odvolání do patnácti dnů od jeho doručení ke "
           "Krajskému soudu v Praze prostřednictvím Okresního soudu v Kolíně. Odvolání musí směřovat proti "
           "všem výrokům, musí být odůvodněno a musí z něj být zřejmé, kdo je podává, které věci se týká a "
@@ -127,25 +144,41 @@ STAFF = [Value("JMENO", "Alena Rýdlová"), Value("PRIJMENI", "Rýdlová"),
          Value("JMENO", "Božena Linhartová"), Value("PRIJMENI", "Linhartová")]
 
 
-def font():
-    for path in FONTS:
+def font(face=None):
+    """Path of the font file: ``face`` (a key of ``FACES`` or a path), else ``use_font``, else ``SPISREDAKT_TEST_FONT``,
+    else the first of ``FONTS`` that exists (DejaVu, Liberation, Arial)."""
+    choice = face or (_chosen[-1] if _chosen else None) or os.environ.get("SPISREDAKT_TEST_FONT")
+    candidates = FACES.get(choice, (choice,)) if choice else FONTS
+    for path in candidates:
         if Path(path).is_file():
             return path
+    if choice:
+        raise RuntimeError("Požadované testovací písmo není k dispozici.")
     raise RuntimeError("Chybí písmo s českou diakritikou (DejaVu Sans, Liberation Sans nebo Arial).")
+
+
+@contextlib.contextmanager
+def use_font(face):
+    """Make ``font()`` return ``face`` (a key of ``FACES`` or a path) for everything built inside the block."""
+    _chosen.append(face)
+    try:
+        yield
+    finally:
+        _chosen.pop()
 
 
 # -- format builders -----------------------------------------------------------
 
-def text_pdf(pages, header=HEADER):
+def text_pdf(pages, header=HEADER, face=None, size=10, footer=None):
     """Text PDF with a repeated header and a footer 'strana N z M' on every page."""
-    face = font()
+    face = font(face)
     with pymupdf.open() as document:
         for number, body in enumerate(pages, 1):
             page = document.new_page(width=450, height=400)
             page.insert_text((30, 26), header, fontsize=9, fontname="spis", fontfile=face)
-            left = page.insert_textbox(pymupdf.Rect(30, 40, 420, 365), body, fontsize=10, fontname="spis", fontfile=face)
+            left = page.insert_textbox(pymupdf.Rect(30, 40, 420, 365), body, fontsize=size, fontname="spis", fontfile=face)
             assert left >= 0, "Strana je přeplněná."
-            page.insert_text((30, 388), f"strana {number} z {len(pages)}", fontsize=9, fontname="spis", fontfile=face)
+            page.insert_text((30, 388), footer or f"strana {number} z {len(pages)}", fontsize=9, fontname="spis", fontfile=face)
         document.set_metadata({"author": CLERK, "title": f"Spis {CASE}"})
         return document.tobytes()
 

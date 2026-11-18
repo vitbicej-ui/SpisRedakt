@@ -50,6 +50,13 @@ AT_LOOKALIKE = re.compile(
     # part before it has a dot, the domain is no file name and, for letters other than A, "mail" is near.
     r"|(?<=[\w+-])[ \t\n]{1,2}(?P<lone>[A-Za-z])[ \t\n]{0,2}(?=[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b)")
 MAIL_CUE = re.compile(r"mail", re.I)
+# After "e-mail" the next word is an address even when OCR garbled the "@" beyond recognition
+# ("ilona.kucerova(©Aexample.test", "jan.novak © example. test"): it is replaced together with the
+# leftovers of the "@" and the domain that follow it.
+MAIL_WORD = re.compile(r"\be[-\u2010\u2011\u2212]?[ \t]?mail\b[ \t]*:?[ \t]*", re.I)
+MAIL_NAME = re.compile(r"[^\W\d_][\w+-]*\.[\w+-]*[^\W\d_]")
+NEXT_WORD = re.compile(r"[ \t]+([^\s,;]+)")
+FIRST_WORD = re.compile(r"[^\s,;]+")
 LOCAL_PART = re.compile(r"[\w.+-]+\Z")
 
 
@@ -93,6 +100,32 @@ def lookalike_emails(text):
                            or found[0].rsplit(".", 1)[-1].lower() in FILE_SUFFIXES):
             continue
         yield starts[found.start()], ends[found.end() - 1], found[0]
+
+
+def mail_after_cue(text):
+    """Spans (start, end) of an address written after "e-mail" without a usable "@"."""
+    for cue in MAIL_WORD.finditer(text):
+        first = FIRST_WORD.match(text, cue.end())
+        if not first:
+            continue
+        word = first.group()
+        core = word.rstrip(".:)")
+        if "@" in word or not MAIL_NAME.search(core):
+            continue
+        start, end, position, previous_dot = first.start(), first.start() + len(core), first.end(), word.endswith(".")
+        for _ in range(4):
+            following = NEXT_WORD.match(text, position)
+            if not following:
+                break
+            word = following.group(1)
+            core = word.rstrip(".")
+            if (sum(char.isalnum() for char in word) <= 1 and len(word) <= 3) or "." in core \
+                    or (previous_dot and word.isalpha() and word.islower() and 2 <= len(word) <= 6):
+                end = following.start(1) + len(core)
+                position, previous_dot = following.end(), word.endswith(".")
+            else:
+                break
+        yield start, end
 
 
 DOTTED_BEFORE = re.compile(r"(?<![\w.+-])([\w+-]+(?:\.[\w+-]+)+)[ \t\n]{1,2}\Z")
@@ -223,6 +256,44 @@ class Finding:
     identity: str
 
 
+# Values broken by a line end (a typesetter's hyphenation, a manual break in Word): a word hyphenated at the
+# end of a line is joined, a number broken after or before its "/" or "-" is joined, digit groups on two
+# lines are separated by a blank. The rules look at this view as well as at the text itself.
+WRAPPED = re.compile(r"(?P<word>(?<=[^\W\d_])[-\u2010\u2011\u00ad][ \t]*\n[ \t]*(?=[^\W\d_]))"
+                     r"|(?P<join>(?<=[/-])[ \t]*\n[ \t]*(?=\d)|(?<=\d)[ \t]*\n[ \t]*(?=[/-]\d))"
+                     r"|(?P<blank>(?<=\d)[ \t]*\n[ \t]*(?=\d))")
+
+
+def wrapped_view(text):
+    """``(view, index)`` of ``text`` with broken values joined; ``index[i]`` is the position of view char ``i``."""
+    pieces, index, position = [], [], 0
+    for match in WRAPPED.finditer(text):
+        pieces.append(text[position:match.start()])
+        index.extend(range(position, match.start()))
+        if match.lastgroup == "blank":
+            pieces.append(" ")
+            index.append(match.start())
+        position = match.end()
+    if not pieces:
+        return text, None
+    pieces.append(text[position:])
+    index.extend(range(position, len(text)))
+    return "".join(pieces), index
+
+
+def merge_findings(first, second):
+    """Union of two lists of findings; overlapping ones become one over the whole span (kind of the longer)."""
+    merged = []
+    for item in sorted(first + second, key=lambda found: (found.start, found.start - found.end)):
+        if merged and item.start < merged[-1].end:
+            last = merged[-1]
+            longer = item if item.end - item.start > last.end - last.start else last
+            merged[-1] = Finding(last.start, max(last.end, item.end), longer.kind, longer.identity)
+        else:
+            merged.append(item)
+    return merged
+
+
 class Rules:
     def __init__(self, alias_lines=()):
         self.aliases = {}
@@ -258,15 +329,23 @@ class Rules:
         The rules run on a normalized copy (no-break and other spaces become a space, soft
         hyphens and zero-width characters are dropped) and the spans are mapped back, so
         "Jan\xa0Novák" or "850314\xad2010" are found and replaced in the original text.
+        A text with line breaks is searched a second time with broken values joined (``wrapped_view``).
         """
+        findings = self._find_normalized(text, contexts, ocr)
+        if "\n" in text:
+            view, index = wrapped_view(text)
+            if index is not None:
+                findings = merge_findings(findings, [Finding(index[item.start], index[item.end - 1] + 1, item.kind,
+                                                            item.identity)
+                                                     for item in self._find_normalized(view, contexts, ocr)])
+        return findings
+
+    def _find_normalized(self, text, contexts, ocr):
         normalized, origin = normalize_for_rules(text)
+        findings = self._find(normalized, contexts, ocr)
         if origin is None:
-            return self._find(text, contexts, ocr)
-        mapped = []
-        for item in self._find(normalized, contexts, ocr):
-            start, end = origin[item.start], origin[item.end - 1] + 1
-            mapped.append(Finding(start, end, item.kind, item.identity))
-        return mapped
+            return findings
+        return [Finding(origin[item.start], origin[item.end - 1] + 1, item.kind, item.identity) for item in findings]
 
     def _find(self, text, contexts=True, ocr=False):
         candidates = [(start, end, kind, key(identity))
@@ -294,6 +373,7 @@ class Rules:
         for start, end, shown in lookalike_emails(text):
             candidates.append((start, end, "EMAIL", key(shown)))
         candidates = [extend_email(text, item) if item[2] == "EMAIL" else item for item in candidates]
+        candidates += [(start, end, "EMAIL", key(text[start:end])) for start, end in mail_after_cue(text)]
         candidates += self.numeric_candidates(text, candidates, ocr)
         candidates.sort(key=lambda item: (item[0], item[0] - item[1]))
         merged = []

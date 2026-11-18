@@ -2100,11 +2100,49 @@ class OcrAtSignTests(unittest.TestCase):
             self.assertIn("[EMAIL-1]", output, text)
             self.assertNotIn("ondrackova", output, text)
 
+    def test_address_after_the_e_mail_cue_is_replaced_whatever_the_at_sign_looks_like(self):
+        for text in ("tel. 1, e-mail ilona.kucerova(\xa9Aexample.test, rodné", "e-mail radoslava.ondrackova \xa9 example. test, rodné",
+                     "E-mail: radoslava.ondrackova (Y example.test\nrodné", "e\xadmail \"adoslava.ondrackova example test rodné"):
+            output = Rules().replace(text, ocr=True)[0]
+            self.assertIn("[EMAIL-1]", output, ascii(text))
+            self.assertNotIn("ondrackova", output, ascii(text))
+            self.assertNotIn("kucerova", output, ascii(text))
+        for text in ("e-mail dne 12.3.2026 byl odeslán", "E-mail: viz. níže", "Pošlete e-mail. Dotaz bude vyřízen.",
+                     "e-mail ze dne 3. 3. 2026"):
+            self.assertEqual(Rules().replace(text, ocr=True)[0], text)
+
     def test_ordinary_text_stays(self):
         for text in ("Smlouva (a příloha č. 2) platí.", "Viz bod (a) výše.", "Jan a Firma.cz",
                      "smlouva.pdf a priloha.pdf", "Copyright © 2020 Firma.cz",
                      "Viz www.justice.cz Ministerstvo spravedlnosti.", "jan.novak Wexample.test bez slova pošta"):
             self.assertEqual(Rules().replace(text, ocr=True)[0], text)
+
+
+class WrappedValueTests(unittest.TestCase):
+    """Values broken by a line end or a manual break (synthetic values only)."""
+
+    def test_values_broken_over_lines_are_replaced_whole(self):
+        cases = (("Žalobkyně paní Radoslava Ondráč-\nková, bytem", "Ondráč", "ková"),
+                 ("Žalobkyně paní Radoslava Ondráč\xad\nková, bytem", "Ondráč", "ková"),
+                 ("Rodné číslo 885809/\n1715.", "885809", "1715"),
+                 ("Rodné číslo 885809\n/1715.", "885809", "1715"),
+                 ("Účet 35-\n1122334455/0800.", "1122334455", "0800"),
+                 ("Účet 4400112233/\n0100.", "4400112233", "0100"),
+                 ("Rodné číslo 885809\n1715.", "885809", "1715"))
+        for text, *parts in cases:
+            output = Rules().replace(text, ocr=False)[0]
+            for part in parts:
+                self.assertNotIn(part, output, ascii(text))
+
+    def test_text_around_a_break_stays(self):
+        for text in ("Strana 1\nStrana 2", "Smlouva o dílo -\nviz příloha", "Ve věci sp. zn. 25 Cdo 1234/2019-\n12 viz"):
+            self.assertEqual(Rules().replace(text)[0], text, ascii(text))
+
+    def test_findings_keep_their_positions_in_the_original_text(self):
+        text = "Dne 1. 1. 2026\xa0přišla paní Radoslava Ondráč-\nková."
+        found = Rules().find(text)
+        self.assertEqual([text[item.start:item.end] for item in found if item.kind == "OSOBA"],
+                         ["Radoslava Ondráč-\nková"])
 
 
 class NumericRuleTests(unittest.TestCase):
