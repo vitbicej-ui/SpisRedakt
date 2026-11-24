@@ -174,3 +174,7 @@ Ověřeno orchestrátorem mimo testy vývojářů: ruční příklady příjmen�
 ## 15. Jednotné pseudonymy mezi dávkami (c9088d8)
 
 `anonymizer/pseudonyms.py`: mapa `.spisredakt-mapa` a klíč `.spisredakt-klic` ve výstupní složce, HMAC-SHA256 otisky, DPAPI přes ctypes (v testech vyměnitelná `pseudonyms.protection`). Poškozená mapa nebo chybějící klíč: mapa se nepoužije ani nepřepíše. Skutečné DPAPI ověří jen test na Windows CI.
+
+## 16. Převod DOC/XLS přes LibreOffice (7b167dd)
+
+`legacy.to_modern`: volba `USE_OFFICE` z GUI, `soffice` jen z pevných cest, dočasný profil bez maker a aktualizace odkazů, časový limit, při selhání vlastní převod. COM zůstává jako `[?]` v BACKLOG.md.
