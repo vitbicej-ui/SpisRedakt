@@ -13,7 +13,7 @@ import pymupdf as pdf
 
 from anonymizer.batch import process_batch, process_folders
 from anonymizer.documents import ocr_path, recognize_image
-from anonymizer import czech, rules as rules_module
+from anonymizer import czech, pseudonyms, rules as rules_module
 from anonymizer.rules import Rules
 from anonymizer.reasons import ADVICE, advice, reason_code
 
@@ -304,6 +304,90 @@ class ProcessingTests(unittest.TestCase):
         self.assertEqual(sum(event.get("fallback") == "numbered_filename" for event in events), 2)
         with self.assertRaises(ValueError):
             list(process_folders(source, source / "nested"))
+
+    @staticmethod
+    def fake_dpapi():
+        """Reversible stand-in for DPAPI so the map can be tested on any system."""
+        return lambda: (lambda data: b"FAKE" + data[::-1], lambda data: data[4:][::-1])
+
+    def case_folder(self, name, lines):
+        source = self.root / name
+        source.mkdir()
+        for index, line in enumerate(lines):
+            doc = Document()
+            doc.add_paragraph(line)
+            doc.save(source / f"d{index}.docx")
+        return source
+
+    def run_labels(self, source, destination):
+        texts = {}
+        for original, target, reason in process_folders(source, destination):
+            self.assertIsNotNone(target, reason)
+            texts[original.name] = Document(target).paragraphs[0].text
+        return texts
+
+    def test_pseudonyms_persist_between_batches(self):
+        destination = self.root / "mapped"
+        destination.mkdir()
+        first = self.case_folder("b1", ["Anna Hradilová, tel. 777 123 456.", "Karel Dvořák, Karel Dvořák."])
+        second = self.case_folder("b2", ["Karel Dvořák a Anna Hradilová, tel. 777 123 456, e-mail: x.y@example.test.",
+                                         "Podepsal K. Dvořák."])
+        with mock.patch.object(pseudonyms, "protection", self.fake_dpapi()):
+            one = self.run_labels(first, destination)
+            two = self.run_labels(second, destination)
+        self.assertEqual(one["d0.docx"], "[OSOBA-1], tel. [TELEFON-1].")
+        self.assertEqual(one["d1.docx"], "[OSOBA-2], [OSOBA-2].")
+        self.assertEqual(two["d0.docx"], "[OSOBA-2] a [OSOBA-1], tel. [TELEFON-1], e-mail: [EMAIL-1].")
+        # initials join the known full name from the map even though it is absent in this batch
+        self.assertEqual(two["d1.docx"], "Podepsal [OSOBA-2].")
+        mapfile = (destination / pseudonyms.MAP_NAME).read_bytes()
+        keyfile = (destination / pseudonyms.KEY_NAME).read_bytes()
+        for secret in ("hradil", "dvořák", "dvorak", "777", "123 456", "example", "x.y"):
+            self.assertNotIn(secret.encode("utf-8"), mapfile.lower())
+            self.assertNotIn(secret.encode("utf-8"), keyfile.lower())
+        # a new label continues after the stored counters
+        third = self.case_folder("b3", ["Eva Malá."])
+        with mock.patch.object(pseudonyms, "protection", self.fake_dpapi()):
+            self.assertEqual(self.run_labels(third, destination)["d0.docx"], "[OSOBA-3].")
+
+    def test_pseudonym_map_fails_safe(self):
+        lines = ["Anna Hradilová, Anna Hradilová."]
+        # without DPAPI (other systems): no files, labels as without a map
+        plain = self.root / "plain"
+        plain.mkdir()
+        with mock.patch.object(pseudonyms, "protection", lambda: None):
+            self.assertEqual(self.run_labels(self.case_folder("p1", lines), plain)["d0.docx"], "[OSOBA-1], [OSOBA-1].")
+        self.assertFalse((plain / pseudonyms.MAP_NAME).exists())
+        self.assertFalse((plain / pseudonyms.KEY_NAME).exists())
+        # a failing DPAPI does not crash the batch
+        def broken():
+            raise OSError("DPAPI")
+        with mock.patch.object(pseudonyms, "protection", broken):
+            self.assertEqual(self.run_labels(self.case_folder("p2", lines), plain)["d0.docx"], "[OSOBA-1], [OSOBA-1].")
+        # damaged map, missing key, damaged key: the batch starts from 1 and files stay untouched
+        for index, damage in enumerate(("map", "key_missing", "key_bad")):
+            folder = self.root / f"damaged{index}"
+            folder.mkdir()
+            with mock.patch.object(pseudonyms, "protection", self.fake_dpapi()):
+                self.run_labels(self.case_folder(f"s{index}", ["Karel Dvořák, Eva Malá."]), folder)
+                mapfile, keyfile = folder / pseudonyms.MAP_NAME, folder / pseudonyms.KEY_NAME
+                if damage == "map":
+                    mapfile.write_bytes(mapfile.read_bytes()[:-9] + b"tampered}")
+                elif damage == "key_missing":
+                    keyfile.unlink()
+                else:
+                    keyfile.write_bytes(b"garbage")
+                before = mapfile.read_bytes()
+                texts = self.run_labels(self.case_folder(f"t{index}", ["Eva Malá, Karel Dvořák."]), folder)
+            self.assertEqual(texts["d0.docx"], "[OSOBA-2], [OSOBA-1].")
+            self.assertEqual(mapfile.read_bytes(), before)
+
+    @unittest.skipUnless(os.name == "nt", "DPAPI exists only in Windows")
+    def test_real_dpapi_roundtrip(self):
+        protect, unprotect = pseudonyms.protection()
+        secret = os.urandom(32)
+        self.assertNotEqual(protect(secret), secret)
+        self.assertEqual(unprotect(protect(secret)), secret)
 
     def test_word_keeps_formatting_and_redacts_across_runs(self):
         from docx.shared import Pt

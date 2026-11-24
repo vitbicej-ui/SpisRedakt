@@ -7,6 +7,7 @@ import os
 from .documents import redact_docx, redact_pdf
 from .formats import SUPPORTED, ARCHIVE_BYTES, FormatError, size_limit, identify, has_signature, HEADER_BYTES, output_suffix, redact_file
 from .rules import Rules
+from .pseudonyms import INTERNAL_NAMES, LabelMap
 from .audit import Audit, VERSION
 from .reasons import reason_code
 
@@ -194,11 +195,22 @@ def _process_folders(input_root, output_root, tessdata, audit, selected, markdow
     if source_root == target_root or source_root in target_root.parents or target_root in source_root.parents:
         raise ValueError("Vstupní a výstupní složka musí být oddělené.")
     sources = sorted(path for path in (source_root.rglob("*") if selected is None else selected)
-                     if path.is_file() and not path.name.startswith("~$")
+                     if path.is_file() and not path.name.startswith("~$") and path.name not in INTERNAL_NAMES
                      and path.resolve().is_relative_to(source_root))
     if not sources:
         raise ValueError("Ve vstupní složce nejsou žádné dokumenty DOCX, XLSX, PPTX nebo PDF.")
-    rules = Rules()
+    # Pseudonyms shared with earlier batches into this folder; None (no DPAPI, damaged map) = as without it.
+    label_map = LabelMap.open(target_root)
+    rules = Rules(label_map=label_map)
+    try:
+        yield from _release(sources, source_root, target_root, rules, tessdata, audit, markdown, copies, split,
+                            progress, summary)
+    finally:
+        if label_map:
+            label_map.save(rules.counts)
+
+
+def _release(sources, source_root, target_root, rules, tessdata, audit, markdown, copies, split, progress, summary):
     documents, _ = collect_documents(sources, rules, tessdata, progress, audit)
     if markdown:
         yield from _markdown(documents, rules, target_root, audit, split, summary)

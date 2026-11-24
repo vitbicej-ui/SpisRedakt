@@ -322,11 +322,13 @@ def merge_findings(first, second):
 
 
 class Rules:
-    def __init__(self, alias_lines=()):
+    def __init__(self, alias_lines=(), label_map=None):
+        # Persistent pseudonyms between batches (see pseudonyms.py); None = labels live in memory only.
+        self.label_map = label_map
         self.aliases = {}
         self.labels = {}
         self.surnames = set()
-        self.counts = Counter()
+        self.counts = Counter(label_map.counters) if label_map else Counter()
         # family key -> [(gender, label)] of every person known by that surname
         self.families = {}
         # given name form (any case) -> canonical given names; canonical -> labels of the persons that have it
@@ -532,17 +534,23 @@ class Rules:
         if item.kind == "OSOBA" and item.identity.startswith("~") and "|" in item.identity:
             return self.surname_label(item.identity)
         person = item.kind == "OSOBA" and identity not in self.labels
+        stored = self.label_map.get(*identity) if self.label_map and identity not in self.labels else None
+        if stored:
+            self.labels[identity] = stored
         keys = ()
         if person:
             initials = INITIALS.fullmatch(item.identity)
             if initials:
-                # "J. Novák" reuses the label of the only known "Jan Novák".
+                # "J. Novák" reuses the label of the only known "Jan Novák" (of this batch or of the map).
                 first = initials[1][0]
-                matches = {label for (kind, known), label in self.labels.items()
-                           if kind == "OSOBA" and not LETTER_INITIAL.match(known)
-                           and known.startswith(first) and known.split(" ", 1)[-1] == initials[2]}
-                if len(matches) == 1:
-                    self.labels[identity] = matches.pop()
+                if identity not in self.labels:
+                    matches = {label for (kind, known), label in self.labels.items()
+                               if kind == "OSOBA" and not LETTER_INITIAL.match(known)
+                               and known.startswith(first) and known.split(" ", 1)[-1] == initials[2]}
+                    if not matches and self.label_map:
+                        matches = self.label_map.get_initials(first, initials[2])
+                    if len(matches) == 1:
+                        self.labels[identity] = matches.pop()
             else:
                 self.surnames.add(item.identity.split(" ", 1)[-1])
         if person:
@@ -558,6 +566,10 @@ class Rules:
             self.register(keys, gender, self.labels[identity])
         if person and not item.identity.startswith(("~", "!")):
             self.register_given(item.identity, self.labels[identity])
+        if self.label_map:
+            self.label_map.put(*identity, self.labels[identity])
+            if item.kind == "OSOBA" and " " in item.identity and not INITIALS.fullmatch(item.identity):
+                self.label_map.put_initials(item.identity[0], item.identity.split(" ", 1)[-1], self.labels[identity])
         return self.labels[identity]
 
     def collect(self, text, ocr=False):
