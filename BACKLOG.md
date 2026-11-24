@@ -32,8 +32,8 @@ Cíl běhu 17. 11. 2026 (termín 18. 11.): jeden ZIP se spisem → `spis_anonymi
 
 ## Funkce
 
-- [ ] **Náhled v GUI.** Zobrazit originál a výstup vedle sebe po stránkách, bez ukládání dalších kopií.
-- [ ] **Ruční vyznačení ploch.** V náhledu PDF nebo obrázku umožnit doplnit začernění myší a výstup znovu ověřit.
+- [?] **Náhled v GUI.** (návrh v PREDANI-VYVOJE.md, oddíl 14; čeká na schválení rozhraní) Zobrazit originál a výstup vedle sebe po stránkách, bez ukládání dalších kopií.
+- [?] **Ruční vyznačení ploch.** (návrh v PREDANI-VYVOJE.md, oddíl 14; čeká na schválení rozhraní) V náhledu PDF nebo obrázku umožnit doplnit začernění myší a výstup znovu ověřit.
 - [ ] **Jednotné pseudonymy mezi dávkami** (rozhodnuto 17. 11. 2026: varianta B). Mapa se ukládá do výstupní složky spisu (`.spisredakt-mapa`). Neobsahuje jména, jen HMAC-SHA256 otisky normalizované identity (`druh + identity`) a k nim štítky a čítače. Klíč HMAC je náhodný, chráněný Windows DPAPI (CryptProtectData přes ctypes, bez nové závislosti) a uložený vedle mapy. Mimo Windows nebo při chybě DPAPI se mapa nepoužije a dávka běží jako dnes. Spojování iniciál se známými jmény musí fungovat i z mapy. Testy: dvě dávky do stejné výstupní složky dají stejné štítky a soubor mapy neobsahuje čitelné identity.
 - [x] **Automatické vydání podle štítku.** Workflow `release.yml` (schváleno 17. 11. 2026). Štítek musí odpovídat `VERSION`. Štítky vytváří jen člověk.
 

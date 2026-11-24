@@ -156,3 +156,17 @@ Ověřeno orchestrátorem mimo testy vývojářů: ruční příklady příjmen�
 - Denní běh v 11:20 zakládá vždy novou session (plánovaná úloha „SpisRedakt – denní běh orchestrátora (nová session)“, model Sonnet). Původní úloha, která budila jednu dlouhou session, je vypnutá.
 - Orchestrátor běží na Sonnetu (`.claude/agents/orchestrator.md`, oddíl „Šetření kontextu a tokenů“). Vícekrokovou práci včetně pushe a oprav Windows CI dělá vývojář. U bezpečnostně citlivých změn se spouští krátká kontrola modelem Opus.
 - Nová session začíná z tohoto souboru a `BACKLOG.md`. Zapisuj sem jen to, co další běh potřebuje.
+
+## 14. Návrh rozhraní: náhled a ruční vyznačení (24. 11. 2026, čeká na schválení)
+
+**Náhled v GUI.** Po zpracování se v seznamu souborů zpřístupní tlačítko „Náhled“ (jen u PDF, obrázků a formátů převoditelných na text).
+- Okno s dvěma panely vedle sebe: vlevo originál, vpravo výstup, stejná stránka, posuv synchronizovaný. Navigace: předchozí/další stránka, číslo stránky, přiblížení.
+- Stránky se vykreslují na požádání (PyMuPDF → `QPixmap`) z originálu a z výstupu; na disk se nic neukládá, vše jen v paměti a po zavření okna se zahodí. U textových formátů se vpravo ukáže text výstupu se zvýrazněnými štítky `[DRUH-n]`, vlevo originální text.
+- Originál se čte jen z už vybraného zdroje; žádné nové kopie ani cesty v hlášeních. Bez sítě.
+
+**Ruční vyznačení ploch.** Rozšíření téhož okna o režim „Doplnit začernění“ (jen PDF a rastrové obrázky).
+- Myší se v panelu originálu nakreslí obdélníky; seznam obdélníků (strana, souřadnice, bez textu) je jediný nový stav. Tlačítka: smazat poslední, zrušit vše.
+- „Použít“ znovu zpracuje soubor: obdélníky se přidají k automatickým začerněním jako další `redact` plochy a pod nimi se odstraní text i pixely (stejná cesta jako dnes pro OCR/obrázky). Výstup se znovu ověří kontrolou před vydáním a detektorem úniků; při selhání se soubor nevydá.
+- Audit uloží jen počet ručních ploch na stranu, ne souřadnice ani obsah.
+
+**K rozhodnutí:** (1) zda náhled smí zobrazit originál vedle výstupu (zobrazuje osobní údaje na obrazovce); (2) zda se ruční plochy mají ukládat do mapy dávky, nebo platit jen pro jedno zpracování (doporučeno: jen jedno zpracování).
