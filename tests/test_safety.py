@@ -121,7 +121,8 @@ class Batch(unittest.TestCase):
         return results
 
     def outputs(self):
-        return sorted(path for path in self.target.rglob("*") if path.is_file())
+        return sorted(path for path in self.target.rglob("*")
+                      if path.is_file() and not path.name.startswith(".spisredakt-"))
 
     def leaks(self, values=VALUES):
         texts = []

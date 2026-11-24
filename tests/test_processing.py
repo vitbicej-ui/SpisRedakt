@@ -359,6 +359,12 @@ class ProcessingTests(unittest.TestCase):
             self.assertEqual(self.run_labels(self.case_folder("p1", lines), plain)["d0.docx"], "[OSOBA-1], [OSOBA-1].")
         self.assertFalse((plain / pseudonyms.MAP_NAME).exists())
         self.assertFalse((plain / pseudonyms.KEY_NAME).exists())
+        # a run that finds nothing leaves no map and no key behind
+        empty = self.root / "empty"
+        empty.mkdir()
+        with mock.patch.object(pseudonyms, "protection", self.fake_dpapi()):
+            self.run_labels(self.case_folder("p0", ["Obyčejný text bez údajů."]), empty)
+        self.assertEqual([p.name for p in empty.iterdir() if p.name in pseudonyms.INTERNAL_NAMES], [])
         # a failing DPAPI does not crash the batch
         def broken():
             raise OSError("DPAPI")
@@ -1773,7 +1779,7 @@ class CaseFileTests(unittest.TestCase):
         for expected in ("spis_anonymizovano.md", "spis_anonymizovano_2.md"):
             results, _ = self.run_case(markdown=True, copies=False)
             self.assertEqual([(source, target.name) for source, target, _ in results], [(None, expected)])
-        self.assertEqual(sorted(path.name for path in self.target.iterdir()),
+        self.assertEqual(sorted(path.name for path in self.target.iterdir() if path.name not in pseudonyms.INTERNAL_NAMES),
                          ["spis_anonymizovano.md", "spis_anonymizovano_2.md"])
 
     def test_zip_with_refused_items(self):
@@ -1885,7 +1891,7 @@ class CaseFileTests(unittest.TestCase):
             self.assertEqual(summaries[0]["error"], results[0][2])
             self.assertIsNone(summaries[0]["markdown"])
             self.assertEqual(list(self.target.glob("spis_anonymizovano*")), [], leaked)
-            self.assertEqual(list(self.target.iterdir()), [])
+            self.assertEqual([path for path in self.target.iterdir() if path.name not in pseudonyms.INTERNAL_NAMES], [])
             for forbidden in ("Hájek", "800201", "1980"):
                 self.assertNotIn(forbidden, results[0][2])
         log = self.audit_log()

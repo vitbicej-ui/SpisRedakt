@@ -85,6 +85,7 @@ class LabelMap:
         self.counters = counters or {}
         self.writable = writable
         self.changed = False
+        self.sealed_key = None  # DPAPI-protected new key, not yet on disk
 
     @classmethod
     def open(cls, folder):
@@ -103,9 +104,13 @@ class LabelMap:
                 return None  # a map without its key cannot be read and is not overwritten
             else:
                 key = secrets.token_bytes(32)
-                _write(key_path, protect(key))
+                sealed = protect(key)  # written together with the first map, so an empty run leaves no files
+                if unprotect(sealed) != key:
+                    return None
             if not map_path.is_file():
-                return cls(key, folder)
+                made = cls(key, folder)
+                made.sealed_key = sealed if not key_path.is_file() else None
+                return made
             return cls._load(key, folder, map_path.read_bytes())
         except Exception:
             return None
@@ -169,6 +174,9 @@ class LabelMap:
             body = json.dumps(dict(labels=self.labels, initials=self.initials, counters=counters),
                               sort_keys=True, ensure_ascii=True)
             mac = hmac.new(self.key, body.encode("ascii"), "sha256").hexdigest()
+            if self.sealed_key is not None:
+                _write(self.folder / KEY_NAME, self.sealed_key)
+                self.sealed_key = None
             _write(self.folder / MAP_NAME, json.dumps(dict(v=FORMAT, body=body, mac=mac)).encode("ascii"))
             return True
         except Exception:
