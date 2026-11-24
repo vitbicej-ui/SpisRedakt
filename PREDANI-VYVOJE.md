@@ -170,3 +170,7 @@ Ověřeno orchestrátorem mimo testy vývojářů: ruční příklady příjmen�
 - Audit uloží jen počet ručních ploch na stranu, ne souřadnice ani obsah.
 
 **K rozhodnutí:** (1) zda náhled smí zobrazit originál vedle výstupu (zobrazuje osobní údaje na obrazovce); (2) zda se ruční plochy mají ukládat do mapy dávky, nebo platit jen pro jedno zpracování (doporučeno: jen jedno zpracování).
+
+## 15. Jednotné pseudonymy mezi dávkami (c9088d8)
+
+`anonymizer/pseudonyms.py`: mapa `.spisredakt-mapa` a klíč `.spisredakt-klic` ve výstupní složce, HMAC-SHA256 otisky, DPAPI přes ctypes (v testech vyměnitelná `pseudonyms.protection`). Poškozená mapa nebo chybějící klíč: mapa se nepoužije ani nepřepíše. Skutečné DPAPI ověří jen test na Windows CI.
