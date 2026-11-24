@@ -38,6 +38,7 @@ Cíl běhu 17. 11. 2026 (termín 18. 11.): jeden ZIP se spisem → `spis_anonymi
 - [x] **Automatické vydání podle štítku.** Workflow `release.yml` (schváleno 17. 11. 2026). Štítek musí odpovídat `VERSION`. Štítky vytváří jen člověk.
 
 - [ ] **Věrný převod DOC a XLS přes nainstalovaný Office** (rozhodnuto 17. 11. 2026: varianta B). Volba v GUI „Převádět DOC/XLS přes Word nebo LibreOffice“, výchozí stav vypnuto, uložená v nastavení aplikace. Když je zapnutá a na počítači je Word nebo Excel (COM přes ctypes/comtypes jen se schválenou závislostí, jinak `soffice --headless --convert-to`, nalezený v obvyklých cestách), převést soubor na DOCX/XLSX v dočasné složce a pokračovat běžnou cestou Office. Bez nalezeného programu nebo při chybě použít dnešní vlastní převod. Žádná síť, žádné makro, převod s vypnutými makry a aktualizacemi odkazů. Novou závislost (např. pywin32) označ `[?]`.
+- [?] **Převod DOC/XLS přes COM (Word/Excel).** Vyžaduje novou závislost (pywin32 nebo comtypes), kterou musí schválit člověk.
 
 ## Hotovo
 

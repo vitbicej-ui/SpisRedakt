@@ -308,9 +308,9 @@ def redact_file(source, destination, suffix, rules, tessdata):
             if archive.testzip() is not None or archive.namelist()[0] != "mimetype":
                 raise FormatError("corrupt_output", "Výstup OpenDocument nelze přečíst.")
     elif suffix in LEGACY:
-        from .legacy import doc_to_docx, xls_to_xlsx
+        from .legacy import to_modern
 
-        converted = (doc_to_docx if suffix == ".doc" else xls_to_xlsx)(source.read_bytes())
+        converted = to_modern(source.read_bytes(), suffix)
         staged = destination.with_name(destination.stem + "-converted" + LEGACY[suffix])
         try:
             staged.write_bytes(converted)

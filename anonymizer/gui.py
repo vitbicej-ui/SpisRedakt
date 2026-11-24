@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
+from . import legacy
 from .batch import process_folders
 from .reasons import ADVICE, GENERAL_ADVICE, advice
 
@@ -140,11 +141,14 @@ class Window(QWidget):
             self.buttons.append(button)
         self.options = {}
         for key, title in (("copies", "Vytvořit také anonymizovaný ZIP pro kontrolu"),
-                           ("split", "Rozdělit po dokumentech")):
+                           ("split", "Rozdělit po dokumentech"),
+                           ("office", "Převádět DOC/XLS přes Word nebo LibreOffice")):
             box = QCheckBox(title)
             box.setChecked(self.settings.value(key, False, bool))
             box.toggled.connect(lambda checked, name=key: self.save_option(name, checked))
             self.options[key] = box
+            if key == "office":
+                legacy.USE_OFFICE = box.isChecked()
             self.buttons.append(box)
             layout.addWidget(box)
         self.status = QLabel()
@@ -164,6 +168,8 @@ class Window(QWidget):
         self.timer.start(2500)
 
     def save_option(self, key, checked):
+        if key == "office":
+            legacy.USE_OFFICE = bool(checked)
         self.settings.setValue(key, bool(checked))
         self.settings.sync()
 

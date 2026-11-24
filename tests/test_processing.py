@@ -2339,5 +2339,95 @@ class NumericRuleTests(unittest.TestCase):
                 self.assertEqual("[CI…] dlouhé číslo ze skenu, možný údaj" in output.text, ocr)
 
 
+class OfficeConversionTests(unittest.TestCase):
+    def setUp(self):
+        from anonymizer import legacy
+
+        self.legacy = legacy
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        self.addCleanup(setattr, legacy, "USE_OFFICE", legacy.USE_OFFICE)
+
+    def make_legacy(self, suffix):
+        import subprocess
+
+        if self.legacy.find_office() is None:
+            self.skipTest("LibreOffice není nainstalovaný.")
+        if suffix == ".doc":
+            document = Document()
+            document.add_paragraph("Smlouva s Pan Jan Novák, tel. 777 123 456")
+            document.save(self.root / "zdroj.docx")
+            source = "zdroj.docx"
+        else:
+            from openpyxl import Workbook
+
+            book = Workbook()
+            book.active.append(["Jméno", "Telefon"])
+            book.active.append(["Pan Jan Novák", "777123456"])
+            book.save(self.root / "zdroj.xlsx")
+            source = "zdroj.xlsx"
+        subprocess.run([self.legacy.find_office(), "-env:UserInstallation=" + (self.root / "p").as_uri(),
+                        "--headless", "--convert-to", suffix[1:], "--outdir", str(self.root / "o"),
+                        str(self.root / source)], check=True, timeout=120,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return (self.root / "o" / ("zdroj" + suffix)).read_bytes()
+
+    def test_converts_doc_and_xls_through_office(self):
+        from anonymizer.formats import redact_file
+
+        self.legacy.USE_OFFICE = True
+        for suffix, output in ((".doc", ".docx"), (".xls", ".xlsx")):
+            data = self.make_legacy(suffix)
+            converted = self.legacy.office_convert(data, suffix)
+            self.assertEqual(converted[:2], b"PK")
+            source, target = self.root / ("a" + suffix), self.root / ("a_out" + output)
+            source.write_bytes(data)
+            redact_file(source, target, suffix, Rules(), None)
+            with ZipFile(target) as archive:
+                body = b"".join(archive.read(name) for name in archive.namelist() if name.endswith(".xml"))
+            self.assertNotIn("Novák".encode(), body)
+            self.assertNotIn(b"777123456", body)
+
+    def test_temporary_folder_is_removed(self):
+        seen = []
+        original = tempfile.TemporaryDirectory
+
+        def tracking(*args, **kwargs):
+            folder = original(*args, **kwargs)
+            seen.append(Path(folder.name))
+            return folder
+
+        data = self.make_legacy(".doc")
+        with mock.patch("anonymizer.legacy.tempfile.TemporaryDirectory", tracking):
+            self.assertIsNotNone(self.legacy.office_convert(data, ".doc"))
+        self.assertTrue(seen)
+        self.assertFalse(any(path.exists() for path in seen))
+
+    def test_falls_back_without_office_on_error_and_timeout(self):
+        import subprocess
+
+        self.legacy.USE_OFFICE = True
+        cases = (("missing", None, None),
+                 ("timeout", "/usr/bin/soffice", subprocess.TimeoutExpired("x", 1)),
+                 ("error", "/usr/bin/soffice", subprocess.CalledProcessError(1, "x")))
+        for name, program, failure in cases:
+            with self.subTest(name), \
+                    mock.patch("anonymizer.legacy.find_office", return_value=program), \
+                    mock.patch("anonymizer.legacy.subprocess.run", side_effect=failure), \
+                    mock.patch("anonymizer.legacy.doc_to_docx", return_value=b"builtin"):
+                self.assertEqual(self.legacy.to_modern(b"x", ".doc"), b"builtin")
+
+    def test_office_is_not_used_when_disabled_and_path_is_not_searched(self):
+        self.legacy.USE_OFFICE = False
+        with mock.patch("anonymizer.legacy.office_convert") as convert, \
+                mock.patch("anonymizer.legacy.doc_to_docx", return_value=b"builtin"):
+            self.assertEqual(self.legacy.to_modern(b"x", ".doc"), b"builtin")
+        convert.assert_not_called()
+        with mock.patch("os.path.isfile", return_value=False), mock.patch("shutil.which") as which:
+            self.assertIsNone(self.legacy.find_office())
+        which.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

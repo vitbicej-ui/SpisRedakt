@@ -5,14 +5,85 @@ table structure and cell values are carried over: formatting, images,
 formulas, comments and macros are not, so nothing hidden can slip through.
 """
 import io
+import os
 import re
 import struct
+import subprocess
+import sys
+import tempfile
 from bisect import bisect_right
 from datetime import datetime
+from pathlib import Path
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
 
 PICTURE = "[OBRÁZEK VYNECHÁN]"
+
+# Optional faithful conversion through an installed LibreOffice (set from the GUI setting).
+USE_OFFICE = False
+OFFICE_TIMEOUT = 120
+_TARGETS = {".doc": "docx", ".xls": "xlsx"}
+_PROFILE = """<?xml version="1.0" encoding="UTF-8"?>
+<oor:items xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="MacroSecurityLevel" oor:op="fuse"><value>3</value></prop></item>
+<item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="DisableMacrosExecution" oor:op="fuse"><value>true</value></prop></item>
+<item oor:path="/org.openoffice.Office.Writer/Content/Update"><prop oor:name="Link" oor:op="fuse"><value>2</value></prop></item>
+<item oor:path="/org.openoffice.Office.Calc/Content/Update"><prop oor:name="Link" oor:op="fuse"><value>2</value></prop></item>
+</oor:items>
+"""
+
+
+def find_office():
+    """Return a LibreOffice executable from well-known locations only (never from PATH)."""
+    if sys.platform == "win32":
+        roots = (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"))
+        candidates = [os.path.join(root, "LibreOffice", "program", "soffice.exe") for root in roots if root]
+    else:
+        candidates = ["/usr/bin/soffice", "/usr/lib/libreoffice/program/soffice",
+                      "/usr/local/bin/soffice", "/opt/libreoffice/program/soffice",
+                      "/Applications/LibreOffice.app/Contents/MacOS/soffice"]
+    return next((path for path in candidates if os.path.isfile(path)), None)
+
+
+def office_convert(data, suffix):
+    """Convert DOC/XLS bytes with LibreOffice; None when unavailable or failed."""
+    program = find_office()
+    target = _TARGETS.get(suffix)
+    if program is None or target is None:
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix="spisredakt-") as folder:
+            profile = os.path.join(folder, "profile")
+            os.makedirs(os.path.join(profile, "user"))
+            with open(os.path.join(profile, "user", "registrymodifications.xcu"), "w", encoding="utf-8") as handle:
+                handle.write(_PROFILE)
+            source = os.path.join(folder, "input" + suffix)
+            with open(source, "wb") as handle:
+                handle.write(data)
+            out = os.path.join(folder, "out")
+            os.makedirs(out)
+            command = [program, "-env:UserInstallation=" + Path(profile).as_uri(),
+                       "--headless", "--norestore", "--nolockcheck", "--nologo", "--nodefault",
+                       "--convert-to", target, "--outdir", out, source]
+            env = {key: value for key, value in os.environ.items()
+                   if key.lower() not in {"http_proxy", "https_proxy", "all_proxy", "ftp_proxy"}}
+            subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=OFFICE_TIMEOUT, check=True, env=env)
+            result = os.path.join(out, "input." + target)
+            with open(result, "rb") as handle:
+                converted = handle.read()
+            return converted if converted[:2] == b"PK" else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def to_modern(data, suffix):
+    """DOC/XLS bytes to DOCX/XLSX bytes: installed LibreOffice if enabled, else the built-in converter."""
+    if USE_OFFICE:
+        converted = office_convert(data, suffix)
+        if converted is not None:
+            return converted
+    return (doc_to_docx if suffix == ".doc" else xls_to_xlsx)(data)
 
 
 # -- DOC -----------------------------------------------------------------------

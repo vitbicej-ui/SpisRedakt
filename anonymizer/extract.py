@@ -1180,11 +1180,11 @@ def _extract(ctx, path, suffix):
     if suffix == ".rtf":
         return _rtf(ctx, path)
     if suffix in formats.LEGACY:
-        from .legacy import doc_to_docx, xls_to_xlsx
+        from .legacy import to_modern
 
         converted = ctx.new_path(formats.LEGACY[suffix])
         try:
-            converted.write_bytes((doc_to_docx if suffix == ".doc" else xls_to_xlsx)(path.read_bytes()))
+            converted.write_bytes(to_modern(path.read_bytes(), suffix))
             return (_docx if suffix == ".doc" else _xlsx)(ctx, converted)
         finally:
             converted.unlink(missing_ok=True)
