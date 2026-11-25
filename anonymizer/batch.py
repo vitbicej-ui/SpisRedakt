@@ -9,6 +9,7 @@ from .formats import SUPPORTED, ARCHIVE_BYTES, FormatError, size_limit, identify
 from .rules import Rules
 from .pseudonyms import INTERNAL_NAMES, LabelMap
 from .audit import Audit, VERSION
+from .manual import MANUAL_MISMATCH
 from .reasons import reason_code
 
 
@@ -19,7 +20,7 @@ RELEASE_CHECK = ("markdown_release_check", "Kontrola výstupu našla možný oso
 
 
 def process_folders(input_root, output_root, tessdata=None, audit_root=None, audit_ready=None, selected=None,
-                    markdown=False, copies=True, split=False, progress=None, summary=None, catalog=None):
+                    markdown=False, copies=True, split=False, progress=None, summary=None, catalog=None, manual_areas=None):
     """Process every input in two phases and yield ``(source, destination, error)``.
 
     Phase 1 reads all inputs and registers every person of the whole case file in one ``Rules``.
@@ -29,6 +30,9 @@ def process_folders(input_root, output_root, tessdata=None, audit_root=None, aud
     ``catalog(dict)`` (memory only, for the preview) is called with ``{"documents": {Dn: facts}, "inputs":
     {input_id: (path, signature)}}`` after phase 1, ``{"markdown": path_or_None, "split": bool}`` after the
     Markdown and ``{"copy": (input_id, path)}`` for every released copy. It never changes any output.
+    ``manual_areas`` (``manual.Areas``, memory only) adds blackout of areas drawn in the preview to the inputs
+    shown as pages, in the Markdown and in the control copy alike; an input whose areas do not fit
+    (changed file, missing page or item, other orientation) is released in neither.
     """
     audit = Audit(audit_root) if audit_root is not None else None
     completed = False
@@ -37,7 +41,7 @@ def process_folders(input_root, output_root, tessdata=None, audit_root=None, aud
             audit.on_fallback = audit_ready
             audit_ready(audit.path, audit.fallback)
         yield from _process_folders(input_root, output_root, tessdata, audit, selected,
-                                    markdown, copies, split, progress, summary, catalog)
+                                    markdown, copies, split, progress, summary, catalog, manual_areas)
         completed = True
     finally:
         if audit:
@@ -86,7 +90,7 @@ def input_signature(source):
     return stat.st_size, stat.st_mtime_ns
 
 
-def collect_documents(sources, rules, tessdata, progress, audit, catalog=None):
+def collect_documents(sources, rules, tessdata, progress, audit, catalog=None, views=None):
     """Phase 1: extract every input into memory (numbered D1..Dn across the batch) and register all labels."""
     from . import extract, markdown as md
 
@@ -107,19 +111,31 @@ def collect_documents(sources, rules, tessdata, progress, audit, catalog=None):
                     raised.append(error)
                     raise
 
+        view = views.get(input_id) if views else None
+        if view is not None:
+            view.begin("extract")
+            # Areas of a file that changed since they were drawn would land on other content.
+            view.refused = view.signature != signatures[input_id][1]
         try:
-            with tempfile.TemporaryDirectory(prefix="SpisRedakt-input-") as private:
-                staged, suffix = stage_input(source, private)
-                if staged is None:
-                    found.append(extract.Skipped(1, "UNKNOWN", "format_unsupported"))
-                else:
-                    found.extend(extract.walk(staged, tessdata, relay))
+            if view is not None and view.refused:
+                found.append(extract.Skipped(1, "UNKNOWN", "manual_area_mismatch"))
+            else:
+                with tempfile.TemporaryDirectory(prefix="SpisRedakt-input-") as private:
+                    staged, suffix = stage_input(source, private)
+                    if staged is None:
+                        found.append(extract.Skipped(1, "UNKNOWN", "format_unsupported"))
+                    else:
+                        found.extend(extract.walk(staged, tessdata, relay, view))
         except Exception as error:
             if raised:
                 raise
             # Items already read stay; the failure itself becomes one unprocessed item.
             found.append(extract.Skipped(1 + max((item.index for item in found), default=0), "UNKNOWN",
                                          failure_code(error)))
+        if view is not None and not view.refused and view.unused():
+            # An area whose item was never reached has nothing to apply to: nothing of this input is released.
+            view.refused = True
+            found = [extract.Skipped(1, "UNKNOWN", "manual_area_mismatch")]
         base_items += last[0]
         base_pages += last[1]
         top = max((item.index for item in found), default=0)
@@ -136,7 +152,8 @@ def collect_documents(sources, rules, tessdata, progress, audit, catalog=None):
         if audit:
             audit.record("extracted", phase="extract", input_id=input_id,
                          documents=sum(isinstance(i, extract.Document) for i in found),
-                         skipped=sum(isinstance(i, extract.Skipped) for i in found))
+                         skipped=sum(isinstance(i, extract.Skipped) for i in found),
+                         **(dict(manual_areas=view.count) if view is not None else {}))
     md.collect(documents, rules)
     if catalog:
         catalog(dict(documents=_facts(documents), inputs=signatures))
@@ -217,7 +234,7 @@ def publish_markdown(output, target_root, rules):
 
 
 def _process_folders(input_root, output_root, tessdata, audit, selected, markdown=False, copies=True,
-                     split=False, progress=None, summary=None, catalog=None):
+                     split=False, progress=None, summary=None, catalog=None, manual_areas=None):
     source_root = Path(input_root).resolve(strict=True)
     target_root = Path(output_root).resolve(strict=True)
     if source_root == target_root or source_root in target_root.parents or target_root in source_root.parents:
@@ -232,15 +249,16 @@ def _process_folders(input_root, output_root, tessdata, audit, selected, markdow
     rules = Rules(label_map=label_map)
     try:
         yield from _release(sources, source_root, target_root, rules, tessdata, audit, markdown, copies, split,
-                            progress, summary, catalog)
+                            progress, summary, catalog, manual_areas)
     finally:
         if label_map:
             label_map.save(rules.counts)
 
 
 def _release(sources, source_root, target_root, rules, tessdata, audit, markdown, copies, split, progress, summary,
-             catalog=None):
-    documents, _ = collect_documents(sources, rules, tessdata, progress, audit, catalog)
+             catalog=None, manual_areas=None):
+    views = manual_areas.views() if manual_areas else {}
+    documents, _ = collect_documents(sources, rules, tessdata, progress, audit, catalog, views)
     if markdown:
         for item in _markdown(documents, rules, target_root, audit, split, summary):
             if catalog:
@@ -249,12 +267,17 @@ def _release(sources, source_root, target_root, rules, tessdata, audit, markdown
     if not copies:
         return
     for index, source in enumerate(sources, 1):
-        fields = dict(input_id=index, format="UNKNOWN")
+        view = views.get(index)
+        fields = dict(input_id=index, format="UNKNOWN", **(dict(manual_areas=view.count) if view else {}))
         phase = "identify"
         attempts = 0
         collisions = 0
         skipped_members = []
         try:
+            if view is not None:
+                if view.refused:
+                    raise ValueError(MANUAL_MISMATCH)
+                view.begin("copy")
             with tempfile.TemporaryDirectory(prefix="SpisRedakt-input-") as private:
                 staged, suffix = stage_input(source, private)
                 if staged is None:
@@ -277,7 +300,10 @@ def _release(sources, source_root, target_root, rules, tessdata, audit, markdown
                     attempts = 1
                     if audit:
                         audit.record("processing", phase=phase, attempts=attempts, **fields)
-                    skipped_members = redact_file(staged, temporary, suffix, rules, tessdata) or []
+                    skipped_members = redact_file(staged, temporary, suffix, rules, tessdata,
+                                                  view.item(()) if view is not None else None) or []
+                    if view is not None and view.unused():
+                        raise ValueError(MANUAL_MISMATCH)
                     phase = "publish"
                     while True:
                         try:

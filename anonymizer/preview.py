@@ -11,8 +11,8 @@ from pathlib import Path
 from zipfile import ZipFile
 
 import pymupdf as pdf
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QImage, QPixmap, QSyntaxHighlighter, QTextCharFormat, QTextCursor
+from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QSyntaxHighlighter, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QScrollArea,
     QSpinBox, QStackedWidget, QVBoxLayout,
@@ -22,6 +22,7 @@ from .batch import input_signature
 from .documents import MAX_PIXELS
 from .extract import MAX_ZIP_DEPTH, _Limited, _pixmap
 from .formats import ARCHIVE_BYTES, SCANS, identify, size_limit
+from .manual import Areas, FIXED_NOTE, normalize
 from .reasons import ADVICE, GENERAL_ADVICE, PREVIEW_MESSAGES
 
 ORIGINAL_TITLE = "Originál – obsahuje osobní údaje"
@@ -242,6 +243,21 @@ class Model:
         data, hint = self._cached(("original", index), lambda: original_bytes(source, locator))
         return render(data, hint, number, zoom)
 
+    def area_target(self, index):
+        """``(locator, signature of the input)`` an area on this item refers to; refuses what is not a page."""
+        facts = self.catalog.documents[index]
+        if facts["code"] is not None:
+            raise PreviewError("preview_unprocessed")
+        locator = facts["locator"]
+        if locator is None:
+            raise PreviewError("preview_no_original")
+        if facts["format"] not in {"PDF", "TIFF", "PNG", "JPEG", "BMP"}:
+            raise PreviewError("preview_not_page")
+        signature = self.catalog.inputs.get(locator[0], (None, None))[1]
+        if signature is None:
+            raise PreviewError("preview_input_changed")
+        return locator, signature
+
     def _copy(self, index):
         facts = self.catalog.documents[index]
         locator = facts["locator"]
@@ -285,11 +301,68 @@ def safe_text(error):
     return message(error.code) if isinstance(error, PreviewError) else message("preview_failed")
 
 
-class PreviewDialog(QDialog):
-    """Modal window: list of items, original page, output section or control copy. Read only."""
+class AreaLabel(QLabel):
+    """The original page; in drawing mode a drag adds a rectangle (kept by the dialog, drawn black with a border)."""
 
-    def __init__(self, catalog, parent=None):
+    def __init__(self, drawn, shown):
+        super().__init__()
+        self.drawn, self.shown = drawn, shown
+        self.drawing = False
+        self.start = self.current = None
+
+    def mousePressEvent(self, event):
+        if self.drawing and event.button() == Qt.MouseButton.LeftButton and not self.pixmap().isNull():
+            self.start = self.current = event.position().toPoint()
+            self.update()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.start is not None:
+            self.current = event.position().toPoint()
+            self.update()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self.start is not None:
+            start, end = self.start, event.position().toPoint()
+            self.start = self.current = None
+            self.update()
+            self.drawn(start.x(), start.y(), end.x(), end.y(), self.pixmap().width(), self.pixmap().height())
+        else:
+            super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        pixmap = self.pixmap()
+        if pixmap is None or pixmap.isNull():
+            return
+        painter = QPainter(self)
+        painter.setPen(QPen(QColor("#ffcc00"), 2))
+        painter.setBrush(QColor("#000000"))
+        width, height = pixmap.width(), pixmap.height()
+        for x0, y0, x1, y1 in self.shown():
+            painter.drawRect(QRect(QPoint(round(x0 * width), round(y0 * height)),
+                                   QPoint(round(x1 * width), round(y1 * height))))
+        if self.start is not None and self.current is not None:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor("#ff3030"), 1, Qt.PenStyle.DashLine))
+            painter.drawRect(QRect(self.start, self.current).normalized())
+        painter.end()
+
+
+class PreviewDialog(QDialog):
+    """Modal window: list of items, original page, output section or control copy.
+
+    It changes no file; with "Doplnit začernění" it only collects ``Areas`` (memory) that the window
+    hands to the next processing."""
+
+    def __init__(self, catalog, parent=None, areas=None):
         super().__init__(parent)
+        self.areas = areas if areas is not None else Areas()
+        self.apply_requested = False
+        self.target = None
         self.setWindowTitle("SpisRedakt – náhled")
         self.resize(1280, 780)
         self.model = Model(catalog)
@@ -311,7 +384,7 @@ class PreviewDialog(QDialog):
         middle = QVBoxLayout()
         self.original_title = QLabel(ORIGINAL_TITLE)
         self.original_title.setTextFormat(Qt.TextFormat.PlainText)
-        self.original_image = QLabel()
+        self.original_image = AreaLabel(self.add_area, self.page_areas)
         self.original_image.setTextFormat(Qt.TextFormat.PlainText)
         self.original_image.setWordWrap(True)
         self.original_image.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
@@ -359,6 +432,25 @@ class PreviewDialog(QDialog):
         controls.addStretch(1)
         outer.addLayout(controls)
 
+        manual = QHBoxLayout()
+        self.draw_toggle = QPushButton("Doplnit začernění")
+        self.draw_toggle.setCheckable(True)
+        self.undo = QPushButton("Smazat poslední")
+        self.reset = QPushButton("Zrušit vše")
+        self.use = QPushButton("Použít")
+        self.note = QLabel(FIXED_NOTE)
+        self.note.setTextFormat(Qt.TextFormat.PlainText)
+        self.note.setWordWrap(True)
+        for widget in (self.draw_toggle, self.undo, self.reset, self.use):
+            manual.addWidget(widget)
+        manual.addWidget(self.note, 1)
+        outer.addLayout(manual)
+        self.draw_toggle.toggled.connect(self.set_drawing)
+        self.undo.clicked.connect(self.remove_last)
+        self.reset.clicked.connect(self.clear_areas)
+        self.use.clicked.connect(self.apply)
+        self.refresh_buttons()
+
         self.items.currentRowChanged.connect(self.select)
         self.previous.clicked.connect(lambda: self.number.setValue(self.number.value() - 1))
         self.following.clicked.connect(lambda: self.number.setValue(self.number.value() + 1))
@@ -376,6 +468,13 @@ class PreviewDialog(QDialog):
         self.copy_toggle.setChecked(False)
         self.copy_toggle.blockSignals(False)
         self.copy_toggle.setEnabled(self.index is not None and self.model.has_copy(self.index))
+        self.target = None
+        if self.index is not None:
+            try:
+                self.target = self.model.area_target(self.index)
+            except Exception:
+                pass
+        self.refresh_buttons()
         self.number.blockSignals(True)
         self.number.setValue(1)
         self.number.blockSignals(False)
@@ -384,6 +483,52 @@ class PreviewDialog(QDialog):
         self.count.setText("/ 1")
         self.load_text()
         self.show_page()
+
+    # -- manual areas -------------------------------------------------------------------------------------------
+
+    def set_drawing(self, checked):
+        self.original_image.drawing = bool(checked) and self.target is not None
+        self.original_image.setCursor(Qt.CursorShape.CrossCursor if self.original_image.drawing
+                                      else Qt.CursorShape.ArrowCursor)
+
+    def refresh_buttons(self):
+        self.draw_toggle.setEnabled(self.target is not None)
+        if self.target is None and self.draw_toggle.isChecked():
+            self.draw_toggle.setChecked(False)
+        self.set_drawing(self.draw_toggle.isChecked())
+        self.undo.setEnabled(len(self.areas) > 0)
+        self.reset.setEnabled(len(self.areas) > 0)
+        self.use.setEnabled(len(self.areas) > 0)
+        self.note.setVisible(True)
+        self.original_image.update()
+
+    def page_areas(self):
+        if self.target is None:
+            return []
+        return self.areas.rectangles(self.target[0], self.number.value())
+
+    def add_area(self, x0, y0, x1, y1, width, height):
+        """A drag on the original, in pixels of the shown page; stored normalized, areas under 2x2 pixels dropped."""
+        if self.target is None:
+            return
+        rectangle = normalize(x0, y0, x1, y1, width, height)
+        if rectangle is not None:
+            self.areas.add(self.target[0], self.target[1], self.number.value(), rectangle)
+        self.refresh_buttons()
+
+    def remove_last(self):
+        self.areas.remove_last()
+        self.refresh_buttons()
+
+    def clear_areas(self):
+        self.areas.clear()
+        self.refresh_buttons()
+
+    def apply(self):
+        """Close the window and ask for the same batch to be processed again with the areas."""
+        if len(self.areas):
+            self.apply_requested = True
+            self.accept()
 
     def rezoom(self, step):
         self.zoom = min(max(self.zoom + step, 0), len(ZOOMS) - 1)

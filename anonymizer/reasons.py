@@ -50,6 +50,7 @@ REASONS = (
     ("e-mail", "mail_unsupported_or_residual"),
     ("Zašifrovan", "mail_encrypted"),
     ("Kontrola výstupu našla možný osobní údaj", "markdown_release_check"),
+    ("Ruční plocha neodpovídá", "manual_area_mismatch"),
 )
 
 
@@ -122,6 +123,8 @@ ADVICE.update({
     "markdown_release_check": "Kontrola výstupu našla možný osobní údaj, soubor nebyl vydán. Zpracujte spis znovu; "
                               "pokud se chyba opakuje, rozdělte spis a zjistěte, která položka ji způsobuje.",
     "format_unsupported": "Formát položky aplikace nepodporuje. Převeďte ji na podporovaný formát (například PDF nebo DOCX) a zkuste to znovu.",
+    "manual_area_mismatch": "Ruční plocha neodpovídá souboru (soubor se změnil, má jinou stranu nebo orientaci obrazu, nebo jde "
+                            "o formát bez stran). Soubor se nevydal. Vyznačte plochy znovu nebo soubor zpracujte bez nich.",
     "processing_error": "Položku se nepodařilo zpracovat. Otevřete ji v původním programu, uložte znovu a zkuste to znovu; jinak ji anonymizujte ručně.",
 })
 

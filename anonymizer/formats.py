@@ -10,6 +10,7 @@ from lxml import etree
 import pymupdf as pdf
 
 from .documents import redact_pdf
+from .manual import MANUAL_MISMATCH, PAGE_SUFFIXES
 from .reasons import reason_code
 from .office import BLOCKS, redact_office, redact_image
 
@@ -205,7 +206,7 @@ def copy_limited(stream, target, limit=ARCHIVE_BYTES, block=1 << 20):
     return size
 
 
-def redact_archive(source, target, rules, tessdata=None, depth=0, budget=None):
+def redact_archive(source, target, rules, tessdata=None, depth=0, budget=None, manual=None):
     """Redact every supported member of a ZIP archive into a new archive.
 
     ``source`` and ``target`` are paths or binary file objects; members are read
@@ -233,6 +234,7 @@ def redact_archive(source, target, rules, tessdata=None, depth=0, budget=None):
             if entry.is_dir():
                 continue
             order += 1
+            member = manual.child(order) if manual is not None else None
             # The member never sits in memory as a whole: it is streamed (with the size limit) into a
             # private temporary file and processed from its path.
             with tempfile.TemporaryDirectory(prefix="SpisRedakt-member-") as folder:
@@ -245,11 +247,13 @@ def redact_archive(source, target, rules, tessdata=None, depth=0, budget=None):
                     with archive.open(entry) as stream:
                         copy_limited(stream, staged)
                     suffix = identify(staged, Path(entry.filename).suffix.lower())
+                    if member and suffix not in PAGE_SUFFIXES:
+                        raise ValueError(MANUAL_MISMATCH)
                     if suffix == ".zip":
                         released = ".zip"
                         cleaned = Path(folder) / "output.zip"
                         skipped.extend((order, code) for _, code in
-                                       redact_archive(staged, cleaned, rules, tessdata, depth + 1, budget))
+                                       redact_archive(staged, cleaned, rules, tessdata, depth + 1, budget, member))
                     elif suffix not in SUPPORTED:
                         raise FormatError("archive_member_unsupported", "Archiv obsahuje nepodporovanou položku.")
                     elif staged.stat().st_size > size_limit(suffix):
@@ -258,7 +262,7 @@ def redact_archive(source, target, rules, tessdata=None, depth=0, budget=None):
                         staged = staged.rename(staged.with_name("input" + suffix))
                         released = output_suffix(suffix)
                         cleaned = Path(folder) / ("output" + released)
-                        if redact_file(staged, cleaned, suffix, rules, tessdata):
+                        if redact_file(staged, cleaned, suffix, rules, tessdata, member):
                             # A member is never released with parts missing.
                             raise FormatError("attachment_unsupported",
                                               "E-mail nebo archiv obsahuje položku v nepodporovaném formátu.")
@@ -280,7 +284,7 @@ def redact_archive(source, target, rules, tessdata=None, depth=0, budget=None):
     return skipped
 
 
-def redact_scan(source, destination, rules, tessdata):
+def redact_scan(source, destination, rules, tessdata, manual=None):
     """Redact a (multi-page) TIFF scan through the image-only PDF pipeline."""
     with pdf.open(source, filetype="tiff") as scan:
         if not scan.page_count or scan.page_count > 500:
@@ -290,16 +294,18 @@ def redact_scan(source, destination, rules, tessdata):
     try:
         staged.write_bytes(converted)
         # Scans always need OCR: there is no text layer to rely on.
-        redact_pdf(staged, destination, rules, tessdata, force_ocr=True)
+        redact_pdf(staged, destination, rules, tessdata, force_ocr=True, manual=manual)
     finally:
         staged.unlink(missing_ok=True)
 
 
-def redact_file(source, destination, suffix, rules, tessdata):
+def redact_file(source, destination, suffix, rules, tessdata, manual=None):
+    if manual and suffix not in PAGE_SUFFIXES:
+        raise ValueError(MANUAL_MISMATCH)
     if suffix == ".pdf":
-        redact_pdf(source, destination, rules, tessdata)
+        redact_pdf(source, destination, rules, tessdata, manual=manual)
     elif suffix in SCANS:
-        redact_scan(source, destination, rules, tessdata)
+        redact_scan(source, destination, rules, tessdata, manual)
     elif suffix in ODF:
         from .odf import redact_odf
 
@@ -336,13 +342,13 @@ def redact_file(source, destination, suffix, rules, tessdata):
     else:
         skipped = []
         if suffix == ".zip":
-            skipped = redact_archive(source, destination, rules, tessdata)
+            skipped = redact_archive(source, destination, rules, tessdata, manual=manual)
         else:
             data = source.read_bytes()
             if suffix in TEXT:
                 output = redact_text(data, suffix, rules)
             else:
-                output = redact_image(data, suffix[1:], rules, tessdata)
+                output = redact_image(data, suffix[1:], rules, tessdata, manual)
             destination.write_bytes(output)
         if suffix in TEXT:
             reopened = destination.read_bytes()

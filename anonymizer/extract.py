@@ -27,8 +27,9 @@ from lxml import html as lxml_html
 import pymupdf as pdf
 
 from . import formats
-from .documents import MAX_PIXELS, blank, recognize_image, slovak_register
+from .documents import MAX_PIXELS, black_manual, blank, image_upright, recognize_image, slovak_register
 from .formats import SUPPORTED, FormatError, decode, identify, size_limit
+from .manual import PAGE_SUFFIXES
 from .office import DRAW, SHEET, WORD, column_index, xml_root
 from .reasons import reason_code
 
@@ -62,6 +63,9 @@ class Block:
 class Page:
     number: "int | None"
     blocks: "list[Block]"
+    # What a page with manual areas held before they were blacked out. Only the collection of persons reads
+    # it (never the output), so a surname found only under an area still reaches the rules.
+    collect_only: "list[Block] | None" = field(default=None, repr=False)
 
 
 @dataclass
@@ -111,8 +115,9 @@ class _Result:
 
 
 class _Context:
-    def __init__(self, tessdata, progress, folder):
+    def __init__(self, tessdata, progress, folder, manual=None):
         self.tessdata, self.progress, self.folder = tessdata, progress, Path(folder)
+        self.manual = manual
         self.has_ocr = bool(tessdata) and (Path(tessdata) / "ces.traineddata").is_file()
         self.counter = self.items = self.pages = self.files = 0
         self.budget = [formats.ARCHIVE_UNPACKED, formats.ARCHIVE_MEMBERS]
@@ -948,47 +953,105 @@ def _pdf_page(ctx, page):
     return [item[2] for item in items], seen
 
 
-def _pdf(ctx, path):
+def _blacked_blocks(ctx, pixmap, rectangles):
+    """OCR blocks of a page image with the manual areas blacked out before the OCR."""
+    black_manual(pixmap, rectangles)
+    found = ocr_blocks(pixmap, ctx.tessdata)
+    return [Block("p", text=text, ocr=True) for text in found] or [Block("image")]
+
+
+def _manual_scope(manual, count):
+    """Areas must lie on pages the document has; a mismatch skips the item with a fixed code."""
+    if manual:
+        try:
+            manual.validate(count)
+        except ValueError:
+            raise _Skip("manual_area_mismatch") from None
+
+
+def _pdf(ctx, path, manual=None):
     pages = []
     with pdf.open(path) as document:
         if document.needs_pass or not len(document):
             raise _Skip("pdf_encrypted_or_empty")
+        _manual_scope(manual, len(document))
         for number, page in enumerate(document, 1):
+            rectangles = manual.rects(number) if manual else ()
+            if rectangles:
+                manual.dimension(number, page.rect.width, page.rect.height)
+                _need_ocr(ctx)
             blocks, seen = _pdf_page(ctx, page)
             if slovak_register(seen):
                 raise _Skip("withheld_slovak_register")
-            pages.append(Page(number, blocks))
+            if rectangles:
+                # A page with areas is read from its image only; the text layer and the OCR of the images of
+                # the page stay out of the output and go to the collection of persons only.
+                pages.append(Page(number, _blacked_blocks(ctx, _render(page), rectangles) if blocks else [], blocks))
+            else:
+                pages.append(Page(number, blocks))
             ctx.page()
     return _Result(pages, [], [])
 
 
-def _tiff(ctx, path):
+def _tiff(ctx, path, manual=None):
     pages = []
     with pdf.open(path, filetype="tiff") as scan:
         if not scan.page_count or scan.page_count > 500:
             raise _Skip("scan_pages")
+        _manual_scope(manual, scan.page_count)
         for number, page in enumerate(scan, 1):
+            rectangles = manual.rects(number) if manual else ()
+            if rectangles:
+                manual.dimension(number, page.rect.width, page.rect.height)
             if blank(page):
                 pages.append(Page(number, []))
             else:
                 _need_ocr(ctx)
-                found = ocr_blocks(_render(page), ctx.tessdata)
-                pages.append(Page(number, [Block("p", text=t, ocr=True) for t in found] or [Block("image")]))
+                pixmap = _render(page)
+                found = ocr_blocks(pixmap, ctx.tessdata)
+                blocks = [Block("p", text=t, ocr=True) for t in found] or [Block("image")]
+                if rectangles:
+                    pages.append(Page(number, _blacked_blocks(ctx, pixmap, rectangles), blocks))
+                else:
+                    pages.append(Page(number, blocks))
             ctx.page()
     return _Result(pages, [], [])
 
 
-def _image(ctx, path):
+def _image(ctx, path, manual=None):
     _need_ocr(ctx)
-    pix = _pixmap(path.read_bytes())
+    data = path.read_bytes()
+    pix = _pixmap(data)
     if pix is None:
         raise _Skip("office_image_unreadable")
     if pix.width * pix.height > MAX_PIXELS:
         raise _Skip("office_image_too_large")
+    _manual_scope(manual, 1)
+    rectangles = manual.rects(1) if manual else ()
+    if rectangles:
+        manual.dimension(1, pix.width, pix.height)
+        if path.suffix.lower() != ".bmp" and not _upright(data, path.suffix.lower()[1:]):
+            raise _Skip("manual_area_mismatch")
+        shadow = pdf.Pixmap(pix, 0)
     text = "\n\n".join(ocr_blocks(pix, ctx.tessdata))
     block = Block("image", text=text, ocr=True) if text else Block("image")
+    page = Page(None, [block])
+    if rectangles:
+        black_manual(shadow, rectangles)
+        found = "\n\n".join(ocr_blocks(shadow, ctx.tessdata))
+        page = Page(None, [Block("image", text=found, ocr=True) if found else Block("image")], [block])
     ctx.page()
-    return _Result([Page(None, [block])], [], [])
+    return _Result([page], [], [])
+
+
+def _upright(data, extension):
+    """True when the image is drawn upright; an image turned by its EXIF orientation is not the one drawn on."""
+    try:
+        with pdf.open(stream=data, filetype=extension) as image:
+            infos = image[0].get_image_info() if image.page_count == 1 else []
+            return len(infos) == 1 and image_upright(infos[0])
+    except Exception:
+        return False
 
 
 # -- e-mail ----------------------------------------------------------------------------------------
@@ -1165,13 +1228,13 @@ def _text(ctx, path, suffix):
 
 # -- dispatch and walking ------------------------------------------------------------------------------
 
-def _extract(ctx, path, suffix):
+def _extract(ctx, path, suffix, manual=None):
     if suffix == ".pdf":
-        return _pdf(ctx, path)
+        return _pdf(ctx, path, manual)
     if suffix in formats.SCANS:
-        return _tiff(ctx, path)
+        return _tiff(ctx, path, manual)
     if suffix in {".png", ".jpg", ".jpeg", ".bmp"}:
-        return _image(ctx, path)
+        return _image(ctx, path, manual)
     if suffix == ".docx":
         return _docx(ctx, path)
     if suffix == ".xlsx":
@@ -1226,10 +1289,14 @@ class _Limited:
 def _item(ctx, path, hint, parent, zip_depth, depth, unsupported, locator=()):
     """Extract one file; yields its Document or Skipped (and those of its children)."""
     suffix = None
+    # Areas of the item (an e-mail attachment has no locator and never any).
+    manual = ctx.manual.item(locator) if ctx.manual is not None and locator is not None else None
     try:
         suffix = identify(path, hint)
         if suffix is None or suffix not in SUPPORTED:
             raise _Skip(unsupported)
+        if manual and suffix not in PAGE_SUFFIXES:
+            raise _Skip("manual_area_mismatch")
         if depth >= MAX_NESTING:
             raise _Skip("archive_depth")
         if path.stat().st_size > size_limit(suffix):
@@ -1237,7 +1304,7 @@ def _item(ctx, path, hint, parent, zip_depth, depth, unsupported, locator=()):
         if suffix == ".zip":
             yield from _zip(ctx, path, parent, zip_depth, depth, locator)
             return
-        result = _extract(ctx, path, suffix)
+        result = _extract(ctx, path, suffix, manual)
     except _Abort:
         raise
     except Exception as error:
@@ -1309,10 +1376,10 @@ def _zip(ctx, path, parent, zip_depth, depth, locator=()):
                 target.unlink(missing_ok=True)
 
 
-def _run(path, hint, tessdata, progress):
+def _run(path, hint, tessdata, progress, manual=None):
     path = Path(path)
     with tempfile.TemporaryDirectory(prefix="SpisRedakt-extract-") as folder:
-        ctx = _Context(tessdata, progress, folder)
+        ctx = _Context(tessdata, progress, folder, manual)
         try:
             yield from _item(ctx, path, hint if hint is not None else path.suffix.lower(), None, 0, 0,
                              "format_unsupported")
@@ -1320,12 +1387,12 @@ def _run(path, hint, tessdata, progress):
             raise abort.error from None
 
 
-def walk(path, tessdata=None, progress=None) -> Iterator["Document | Skipped"]:
+def walk(path, tessdata=None, progress=None, manual=None) -> Iterator["Document | Skipped"]:
     """Yield a Document or Skipped for every item of a file or ZIP archive, depth first.
 
     ``progress(items, pages)`` is called after every item and page.
     """
-    return _run(path, None, tessdata, progress)
+    return _run(path, None, tessdata, progress, manual)
 
 
 def extract_file(path, suffix, tessdata=None, progress=None) -> "list[Document | Skipped]":

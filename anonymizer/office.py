@@ -7,7 +7,10 @@ from lxml import etree
 import pymupdf as pdf
 
 from .czech import plan_table
-from .documents import MAX_PIXELS, recognize_image, redact_geometry
+from .documents import (
+    MAX_PIXELS, black_manual, image_upright, recognize_image, redact_geometry, verify_black,
+)
+from .manual import MANUAL_MISMATCH
 
 WORD = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 SHEET = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -494,7 +497,10 @@ def office_blocks(root, suffix):
             yield [node]
 
 
-def redact_image(data, extension, rules, tessdata):
+JPEG_BLACK = 40
+
+
+def redact_image(data, extension, rules, tessdata, manual=None):
     if extension == "bmp":
         from PySide6.QtCore import QBuffer, QIODevice
         from PySide6.QtGui import QImage
@@ -506,7 +512,7 @@ def redact_image(data, extension, rules, tessdata):
         buffer.open(QIODevice.OpenModeFlag.WriteOnly)
         if not bitmap.save(buffer, "PNG"):
             raise ValueError("Vložený BMP nelze převést pro OCR.")
-        redacted = redact_image(bytes(buffer.data()), "png", rules, tessdata)
+        redacted = redact_image(bytes(buffer.data()), "png", rules, tessdata, manual)
         buffer.close()
         buffer.setData(b"")
         buffer.open(QIODevice.OpenModeFlag.WriteOnly)
@@ -526,13 +532,26 @@ def redact_image(data, extension, rules, tessdata):
             raise ValueError("Vložený obrázek překračuje limit velikosti.")
         matrix = pdf.Matrix(width / page.rect.width, height / page.rect.height)
         pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+        rectangles = manual.rects(1) if manual else ()
+        if manual:
+            manual.validate(1)
+        if rectangles:
+            # An image turned by its metadata (EXIF) is not the image the areas were drawn on.
+            if not image_upright(info):
+                raise ValueError(MANUAL_MISMATCH)
+            manual.dimension(1, pixmap.width, pixmap.height)
+            filled = black_manual(pixmap, rectangles)
     content, geometry, transform = recognize_image(pixmap, tessdata)
     if not content.strip():
         # OCR cannot distinguish a decorative image from unreadable sensitive text.
         pixmap.clear_with(0)
     else:
         redact_geometry(pixmap, rules, content, geometry, transform, True)
-    return pixmap.tobytes("png" if extension == "png" else "jpeg", jpg_quality=100)
+    output = pixmap.tobytes("png" if extension == "png" else "jpeg", jpg_quality=100)
+    if rectangles:
+        # The encoded image is decoded again: the areas must be black in what is released.
+        verify_black(output, extension, filled, 0 if extension == "png" else JPEG_BLACK)
+    return output
 
 
 def redact_relationships(name, root, renamed, extra=frozenset()):

@@ -7,6 +7,7 @@ module is pure: it returns strings and never writes to disk or logs content.
 """
 import math
 import re
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -430,6 +431,12 @@ def collect(documents, rules):
     """Phase 1: register persons and other labels over every text of the case file."""
     for doc in _documents(documents):
         _process(doc, rules, True)
+        # The text under manual areas is read here only (never rendered), so a surname seen only there
+        # is still known to the rules when the output is written.
+        hidden = [dataclasses.replace(page, blocks=page.collect_only, collect_only=None)
+                  for page in doc.pages if getattr(page, "collect_only", None)]
+        if hidden:
+            _process(dataclasses.replace(doc, pages=hidden), rules, True)
 
 
 # -- rendering ---------------------------------------------------------------------------

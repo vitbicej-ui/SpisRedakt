@@ -126,6 +126,35 @@ def blackout(pixmap, rectangle, matrix):
     return pixel_rect
 
 
+def black_manual(pixmap, rectangles):
+    """Black out manual areas (normalized 0..1) with the margin of ``blackout``; return the filled pixel areas."""
+    width, height = pixmap.width, pixmap.height
+    return [blackout(pixmap, pdf.Rect(x0 * width, y0 * height, x1 * width, y1 * height), pdf.Identity)
+            for x0, y0, x1, y1 in rectangles]
+
+
+def image_upright(info):
+    """True when an image page is drawn without rotation or flip (an EXIF orientation would turn it)."""
+    a, b, c, d = info["transform"][:4]
+    return abs(b) < 1e-6 and abs(c) < 1e-6 and a > 0 and d > 0
+
+
+def verify_black(data, extension, filled, tolerance):
+    """Decode an encoded image and check that every filled area, shrunk by the 2 px margin, is black."""
+    pixmap = pdf.Pixmap(data)
+    if pixmap.alpha or pixmap.colorspace is None or pixmap.n < 3:
+        pixmap = pdf.Pixmap(pdf.csRGB, pdf.Pixmap(pixmap, 0) if pixmap.alpha else pixmap)
+    view, step = pixmap.samples_mv, pixmap.n
+    for area in filled:
+        inner = pdf.IRect(area.x0 + 2, area.y0 + 2, area.x1 - 2, area.y1 - 2) & pixmap.irect
+        if inner.is_empty:
+            inner = area & pixmap.irect
+        for row in range(inner.y0, inner.y1):
+            start = row * pixmap.stride + inner.x0 * step
+            if max(view[start:start + (inner.x1 - inner.x0) * step], default=0) > tolerance:
+                raise ValueError("Výstupní obraz neobsahuje úplnou redakci.")
+
+
 HYPHEN_BREAK = re.compile(r"-\n(?=[a-z\u00e1-\u017e])")
 
 
@@ -215,20 +244,27 @@ def slovak_register(text):
                 or ("priezvisko" in folded and re.search(r"narodenia|ziadatel", folded)))
 
 
-def redact_pdf(source, destination, rules, tessdata=None, force_ocr=False):
+def redact_pdf(source, destination, rules, tessdata=None, force_ocr=False, manual=None):
     expected = []
     with pdf.open(source) as original, pdf.open() as output:
         # A repaired cross-reference table is common in scanner output; every page
         # is re-rendered anyway, so only password protection and emptiness stop it.
         if original.needs_pass or not len(original):
             raise ValueError("PDF je šifrované, poškozené nebo prázdné.")
-        for page in original:
+        if manual:
+            manual.validate(len(original))
+        for number, page in enumerate(original, 1):
             # Large drawings and posters are rendered below 300 DPI to fit the pixel limit.
             dpi = min(300, int(72 * (MAX_PIXELS / max(page.rect.width * page.rect.height, 1)) ** 0.5))
             if dpi < 50:
                 raise ValueError("Stránka přesahuje limit velikosti.")
             scale = pdf.Matrix(dpi / 72, dpi / 72)
             pixmap = page.get_pixmap(matrix=scale, annots=False, alpha=False)
+            # Manual areas only add blackout: black before the OCR, expected by the check of the output.
+            manual_areas = []
+            if manual and manual.rects(number):
+                manual.dimension(number, page.rect.width, page.rect.height)
+                manual_areas = black_manual(pixmap, manual.rects(number))
             raw = page.get_text("rawdict", flags=pdf.TEXTFLAGS_RAWDICT & ~pdf.TEXT_PRESERVE_IMAGES)
             text, boxes = text_geometry(raw)
             matrix = page.rotation_matrix * scale
@@ -246,6 +282,7 @@ def redact_pdf(source, destination, rules, tessdata=None, force_ocr=False):
             if slovak_register(" ".join(source[0] for source in sources)):
                 raise ValueError("Slovenský výpis nebo formulář nebyl vydán: rozložení osobních polí zatím nelze spolehlivě ověřit.")
             redacted = [pixmap.irect] if blacked else []
+            redacted.extend(manual_areas)
             for content, geometry, transform, ocr in sources:
                 redacted.extend(redact_geometry(pixmap, rules, content, geometry, transform, ocr))
             target = output.new_page(width=page.rect.width, height=page.rect.height)

@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 
 from . import legacy
 from .batch import process_folders
+from .manual import Areas, DISCARD_NOTE, REPEAT_NOTE
 from .preview import Catalog, PreviewDialog
 from .reasons import ADVICE, GENERAL_ADVICE, advice
 
@@ -29,12 +30,13 @@ class BatchWorker(QThread):
     handled = Signal(str)
     progress = Signal(int, int)
 
-    def __init__(self, source, output, tessdata, parent, selected, copies=True, split=False):
+    def __init__(self, source, output, tessdata, parent, selected, copies=True, split=False, manual_areas=None):
         super().__init__(parent)
         self.arguments = source, output, tessdata
         self.selected = selected
         self.copies = copies
         self.split = split
+        self.manual_areas = manual_areas
         self.last_progress = 0.0
         # What the preview may know (memory only); read by the window after the batch finished.
         self.catalog = Catalog()
@@ -72,10 +74,13 @@ class BatchWorker(QThread):
                 prefix = "Náhradní složka auditu" if fallback else "Audit dávky"
                 self.result.emit(f"{prefix}: {path}")
             remaining = set(self.selected)
+            if self.manual_areas:
+                self.result.emit(REPEAT_NOTE)
             for source, target, error in process_folders(
                 *self.arguments, audit_root=audit_root, audit_ready=audit_ready, selected=self.selected,
                 markdown=True, copies=self.copies, split=self.split,
                 progress=self.report_progress, summary=self.report_summary, catalog=self.catalog.update,
+                manual_areas=self.manual_areas,
             ):
                 if source is None:
                     continue
@@ -105,6 +110,8 @@ class Window(QWidget):
         self.worker = None
         self.preview = None
         self.catalog = None
+        self.areas = None
+        self.last_run = None
         self.settings = QSettings("SpisRedakt", "SpisRedakt")
         self.source = self.settings.value("input", "", str)
         self.output = self.settings.value("output", "", str)
@@ -205,20 +212,33 @@ class Window(QWidget):
     def forget_catalog(self):
         self.catalog = None
         self.preview_button.setEnabled(False)
+        if self.areas is not None and len(self.areas):
+            self.log.appendPlainText(DISCARD_NOTE)
+        self.areas = None
 
     def open_preview(self):
         """Open the preview of the last finished batch; everything it shows stays in memory."""
         if self.preview is not None or self.worker is not None or not self.catalog:
             return
-        self.preview = PreviewDialog(self.catalog, self)
+        if self.areas is None:
+            self.areas = Areas()
+        self.preview = PreviewDialog(self.catalog, self, self.areas)
         self.preview.finished.connect(self.preview_closed)
         self.preview.open()
 
     def preview_closed(self):
         dialog, self.preview = self.preview, None
         if dialog is not None:
+            again = dialog.apply_requested and len(self.areas or ()) > 0
             dialog.release()
             dialog.deleteLater()
+            if again:
+                QTimer.singleShot(0, self.rerun)
+
+    def rerun(self):
+        """Process the last batch again (same selection, current options) with the manual areas."""
+        if self.worker is None and self.preview is None and self.last_run and self.areas:
+            self.start(*self.last_run, areas=self.areas)
 
     def retry(self):
         if self.source and self.output:
@@ -257,12 +277,19 @@ class Window(QWidget):
             return
         self.pending = pending
         self.forget_catalog()
+        self.last_run = (source, output, list(pending))
+        self.start(source, output, list(pending))
+
+    def start(self, source, output, selected, areas=None):
+        self.catalog = None
+        self.preview_button.setEnabled(False)
         for button in self.buttons:
             button.setEnabled(False)
-        self.status.setText(f"Zpracovávám soubory: {len(pending)}")
-        self.worker = BatchWorker(str(source), str(output), self.tessdata, self, list(pending),
+        self.status.setText(f"Zpracovávám soubory: {len(selected)}")
+        self.worker = BatchWorker(str(source), str(output), self.tessdata, self, selected,
                                    copies=self.options["copies"].isChecked(),
-                                   split=self.options["split"].isChecked())
+                                   split=self.options["split"].isChecked(),
+                                   **({"manual_areas": areas} if areas else {}))
         self.worker.progress.connect(self.show_progress)
         self.worker.result.connect(self.log.appendPlainText)
         self.worker.handled.connect(self.mark_handled)

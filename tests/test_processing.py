@@ -1,5 +1,6 @@
 import hashlib
 import io
+import json
 import os
 import re
 from pathlib import Path
@@ -16,6 +17,7 @@ from anonymizer.batch import process_batch, process_folders
 from anonymizer.documents import ocr_path, recognize_image
 from anonymizer import czech, pseudonyms, rules as rules_module
 from anonymizer.rules import Rules
+from anonymizer.manual import MANUAL_MISMATCH
 from anonymizer.reasons import ADVICE, advice, reason_code
 
 
@@ -2860,6 +2862,513 @@ class PreviewTests(unittest.TestCase):
             self.assertNotIn("{", text)
         for forbidden in ("tempfile", "QSettings", "write_text", "write_bytes", "logging", "audit"):
             self.assertNotIn(forbidden, source)
+
+
+class ManualAreaTests(unittest.TestCase):
+    """Manual redaction areas (14b): only added blackout, in the Markdown and in the control copy alike."""
+
+    TESSDATA = os.environ.get("SPISREDAKT_TEST_TESSDATA")
+    HIDDEN, SHOWN = "ZEBRAKADABRA", "PLANETARIUM"
+
+    def setUp(self):
+        from PySide6.QtWidgets import QApplication
+
+        self.app = QApplication.instance() or QApplication([])
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        self.source, self.target, self.audit = (self.root / name for name in ("in", "out", "audit"))
+        for folder in (self.source, self.target):
+            folder.mkdir()
+
+    # -- builders ------------------------------------------------------------------------------------------
+
+    @classmethod
+    def text_pdf(cls, pages=1, rotation=0, crop=None, tag=""):
+        """Pages whose displayed text is upright, also with /Rotate (the text is turned the other way)."""
+        lines = (f"{cls.HIDDEN} tajne", f"{cls.SHOWN} verejne {tag}")
+        points = {0: [(40, 100), (40, 200)], 90: [(110, 260), (210, 260)], 270: [(110, 40), (210, 40)]}[rotation]
+        with pdf.open() as document:
+            for _ in range(pages):
+                page = document.new_page(width=420, height=300)
+                for point, line in zip(points, lines):
+                    page.insert_text(point, line, fontsize=18, rotate=rotation)
+                page.set_rotation(rotation)
+                if crop:
+                    page.set_cropbox(pdf.Rect(*crop))
+            return document.tobytes()
+
+    @staticmethod
+    def fold(text):
+        import unicodedata
+
+        return "".join(c for c in unicodedata.normalize("NFD", text.upper()) if not unicodedata.combining(c))
+
+    @staticmethod
+    def area_of(data, word, number=1):
+        """Normalized rectangle of ``word`` on the displayed page ``number`` of a PDF."""
+        with pdf.open(stream=data, filetype="pdf") as document:
+            page = document[number - 1]
+            found = page.search_for(word)[0] * page.rotation_matrix
+            full = page.rect
+            return ((found.x0 - full.x0) / full.width, (found.y0 - full.y0) / full.height,
+                    (found.x1 - full.x0) / full.width, (found.y1 - full.y0) / full.height)
+
+    def process(self, areas=None, markdown=True, copies=True):
+        from anonymizer.preview import Catalog
+
+        catalog = Catalog()
+        results = list(process_folders(self.source, self.target, self.TESSDATA, audit_root=self.audit,
+                                       markdown=markdown, copies=copies, catalog=catalog.update,
+                                       manual_areas=areas))
+        return catalog, results
+
+    @staticmethod
+    def add(areas, catalog, index, rectangle, page=1):
+        locator = catalog.documents[index]["locator"]
+        areas.add(locator, catalog.inputs[locator[0]][1], page, rectangle)
+        return areas
+
+    def draw(self, catalog, index, rectangle, page=1):
+        from anonymizer.manual import Areas
+
+        return self.add(Areas(), catalog, index, rectangle, page)
+
+    def copy_text(self, path, number=1):
+        with pdf.open(path) as document:
+            pixmap = document[number - 1].get_pixmap(dpi=200, alpha=False)
+        return recognize_image(pixmap, self.TESSDATA)[0]
+
+    @staticmethod
+    def black_inside(pixmap, rectangle):
+        """True when the area of the page image, shrunk by 1 px, is entirely black."""
+        x0, y0, x1, y1 = rectangle
+        clip = pdf.IRect(round(x0 * pixmap.width) + 1, round(y0 * pixmap.height) + 1,
+                         round(x1 * pixmap.width) - 1, round(y1 * pixmap.height) - 1)
+        return set(pixmap.color_count(clip=clip, colors=True)) == {b"\x00\x00\x00"}
+
+    def copy_black(self, path, rectangle, number=1):
+        with pdf.open(path) as document:
+            return self.black_inside(document[number - 1].get_pixmap(dpi=100, alpha=False), rectangle)
+
+    @staticmethod
+    def content(path):
+        """Bytes of an image, the rendered pages of a PDF (its identifier differs between runs)."""
+        if path.suffix != ".pdf":
+            return path.read_bytes()
+        with pdf.open(path) as document:
+            return [page.get_pixmap(dpi=100, alpha=False).samples for page in document]
+
+    @staticmethod
+    def released(results):
+        return {source.name: target for source, target, error in results if source is not None and target}
+
+    @staticmethod
+    def markdown(catalog):
+        return Path(catalog.markdown).read_text(encoding="utf-8")
+
+    @staticmethod
+    def section(catalog, index):
+        text = Path(catalog.markdown).read_text(encoding="utf-8")
+        return text.split(f"## D{index} (")[1].split("\n## ")[0]
+
+    # -- pages: PDF ----------------------------------------------------------------------------------------
+
+    @unittest.skipUnless(TESSDATA, "chybí SPISREDAKT_TEST_TESSDATA")
+    def test_area_over_a_word_the_rules_do_not_find(self):
+        for label, kwargs in (("plain", {}), ("rotated 90", dict(rotation=90)), ("rotated 270", dict(rotation=270)),
+                              ("shifted cropbox", dict(crop=(30, 40, 400, 280)))):
+            with self.subTest(label):
+                for path in self.source.glob("*"):
+                    path.unlink()
+                data = self.text_pdf(**kwargs)
+                (self.source / "a.pdf").write_bytes(data)
+                baseline, _ = self.process()
+                self.assertIn(self.HIDDEN, self.markdown(baseline))
+                area = self.area_of(data, self.HIDDEN)
+                with pdf.open(stream=data, filetype="pdf") as document:
+                    shown = document[0].get_pixmap(dpi=100, alpha=False)
+                self.assertFalse(self.black_inside(shown, area))
+                self.assertNotEqual(set(shown.color_count(clip=pdf.IRect(
+                    round(area[0] * shown.width), round(area[1] * shown.height),
+                    round(area[2] * shown.width), round(area[3] * shown.height)), colors=True)), {b"\xff\xff\xff"})
+                catalog, results = self.process(self.draw(baseline, 1, area))
+                self.assertEqual([error for _, _, error in results], ["", ""])
+                text = self.fold(self.markdown(catalog))
+                self.assertNotIn("ZEBRA", text)
+                self.assertIn("PLANETARIUM", text)
+                copy = self.released(results)["a.pdf"]
+                # The copy passed validate_pdf with the area expected; its pixels are black, the word is gone.
+                self.assertTrue(self.copy_black(copy, area))
+                text = self.fold(self.copy_text(copy))
+                self.assertNotIn("ZEBRA", text)
+                self.assertIn("PLANETARIUM", text)
+
+
+    # -- pages: scans, images, archives ---------------------------------------------------------------------
+
+    @staticmethod
+    def max_inside(pixmap, rectangle, shrink=3):
+        x0, y0, x1, y1 = rectangle
+        top, bottom = round(y0 * pixmap.height) + shrink, round(y1 * pixmap.height) - shrink
+        left, right = round(x0 * pixmap.width) + shrink, round(x1 * pixmap.width) - shrink
+        view = pixmap.samples_mv
+        return max(max(view[row * pixmap.stride + left * pixmap.n:row * pixmap.stride + right * pixmap.n])
+                   for row in range(top, bottom))
+
+    def images(self):
+        """Synthetic scan (2 pages), PNG and JPEG of the text page; returns (pdf data, rgb pixmap, tiff, png, jpeg)."""
+        data = self.text_pdf(pages=2)
+        with pdf.open(stream=data, filetype="pdf") as document:
+            gray = [page.get_pixmap(dpi=200, alpha=False, colorspace=pdf.csGRAY) for page in document]
+        with pdf.open(stream=self.text_pdf(tag="png"), filetype="pdf") as document:
+            rgb = pdf.Pixmap(pdf.csRGB, document[0].get_pixmap(dpi=200, alpha=False))
+        with pdf.open(stream=self.text_pdf(tag="jpg"), filetype="pdf") as document:
+            other = pdf.Pixmap(pdf.csRGB, document[0].get_pixmap(dpi=200, alpha=False))
+        ProcessingTests.write_tiff(self.root / "sken.tif", gray)
+        return (data, rgb, (self.root / "sken.tif").read_bytes(), rgb.tobytes("png"),
+                other.tobytes("jpeg", jpg_quality=95))
+
+    @unittest.skipUnless(TESSDATA, "chybí SPISREDAKT_TEST_TESSDATA")
+    def test_area_on_a_later_tiff_page_png_and_jpeg(self):
+        data, rgb, tiff, png, jpeg = self.images()
+        for name, content in (("sken.tif", tiff), ("obraz.png", png), ("foto.jpg", jpeg)):
+            (self.source / name).write_bytes(content)
+        baseline, _ = self.process()
+        by_format = {facts["format"]: index for index, facts in baseline.documents.items()}
+        self.assertEqual(sorted(by_format), ["JPEG", "PNG", "TIFF"])
+        self.assertEqual(self.fold(self.section(baseline, by_format["TIFF"])).count("ZEBRA"), 2)
+        area, later = self.area_of(data, self.HIDDEN, 1), self.area_of(data, self.HIDDEN, 2)
+        areas = self.draw(baseline, by_format["TIFF"], later, 2)
+        self.add(areas, baseline, by_format["PNG"], area)
+        self.add(areas, baseline, by_format["JPEG"], area)
+        catalog, results = self.process(areas)
+        self.assertEqual([error for _, _, error in results], ["", "", "", ""])
+        # The scan loses the word on page 2 only; the images lose it altogether.
+        self.assertEqual(self.fold(self.section(catalog, by_format["TIFF"])).count("ZEBRA"), 1)
+        for name in ("PNG", "JPEG"):
+            section = self.fold(self.section(catalog, by_format[name]))
+            self.assertNotIn("ZEBRA", section)
+            self.assertIn("PLANETARIUM", section)
+        copies = self.released(results)
+        scan = copies["sken.tif"]
+        self.assertTrue(self.copy_black(scan, later, 2))
+        self.assertIn("ZEBRA", self.fold(self.copy_text(scan, 1)))
+        self.assertNotIn("ZEBRA", self.fold(self.copy_text(scan, 2)))
+        for name, tolerance in (("obraz.png", 0), ("foto.jpg", 40)):
+            pixmap = pdf.Pixmap(copies[name].read_bytes())
+            self.assertLessEqual(self.max_inside(pixmap, area), tolerance, name)
+            found = self.fold(recognize_image(pixmap, self.TESSDATA)[0])
+            self.assertNotIn("ZEBRA", found, name)
+            self.assertIn("PLANETARIUM", found, name)
+
+    @unittest.skipUnless(TESSDATA, "chybí SPISREDAKT_TEST_TESSDATA")
+    def test_areas_in_a_nested_archive(self):
+        data, rgb, tiff, png, jpeg = self.images()
+        inner = io.BytesIO()
+        with ZipFile(inner, "w") as archive:
+            archive.writestr("a/", b"")
+            archive.writestr("sken.tif", tiff)
+        with ZipFile(self.source / "spis.zip", "w") as archive:
+            archive.writestr("obraz.png", png)
+            archive.writestr("vnorene.zip", inner.getvalue())
+        baseline, _ = self.process()
+        by_format = {facts["format"]: index for index, facts in baseline.documents.items()}
+        self.assertEqual(baseline.documents[by_format["TIFF"]]["locator"], (1, "2/1"))
+        area, later = self.area_of(data, self.HIDDEN, 1), self.area_of(data, self.HIDDEN, 2)
+        areas = self.draw(baseline, by_format["PNG"], area)
+        self.add(areas, baseline, by_format["TIFF"], later, 2)
+        catalog, results = self.process(areas)
+        self.assertEqual([error for _, _, error in results], ["", ""])
+        self.assertNotIn("ZEBRA", self.fold(self.section(catalog, by_format["PNG"])))
+        self.assertEqual(self.fold(self.section(catalog, by_format["TIFF"])).count("ZEBRA"), 1)
+        with ZipFile(catalog.copies[1]) as archive:
+            self.assertNotIn("NEZPRACOVANO.txt", archive.namelist())
+            image = pdf.Pixmap(archive.read("polozka-0001.png"))
+            nested = ZipFile(io.BytesIO(archive.read("polozka-0002.zip")))
+            scan = nested.read("polozka-0001.pdf")
+        self.assertEqual(self.max_inside(image, area), 0)
+        self.assertNotIn("ZEBRA", self.fold(recognize_image(image, self.TESSDATA)[0]))
+        with pdf.open(stream=scan, filetype="pdf") as document:
+            self.assertTrue(self.black_inside(document[1].get_pixmap(dpi=100, alpha=False), later))
+            self.assertFalse(self.black_inside(document[0].get_pixmap(dpi=100, alpha=False), area))
+
+    def test_black_check_of_an_encoded_image_has_a_tolerance_for_jpeg(self):
+        from anonymizer.documents import black_manual, verify_black
+
+        pixmap = pdf.Pixmap(pdf.csRGB, pdf.IRect(0, 0, 400, 300), False)
+        pixmap.clear_with(255)
+        filled = black_manual(pixmap, [(0.25, 0.25, 0.75, 0.75)])
+        for extension, tolerance in (("png", 0), ("jpeg", 40)):
+            data = pixmap.tobytes(extension, jpg_quality=100) if extension == "jpeg" else pixmap.tobytes(extension)
+            verify_black(data, extension, filled, tolerance)
+        light = pdf.Pixmap(pdf.csRGB, pdf.IRect(0, 0, 400, 300), False)
+        light.clear_with(255)
+        light.set_rect(light.irect, (90, 90, 90))
+        for extension in ("png", "jpeg"):
+            with self.assertRaises(ValueError):
+                verify_black(light.tobytes(extension), extension, filled, 40)
+
+    @unittest.skipUnless(TESSDATA, "chybí SPISREDAKT_TEST_TESSDATA")
+    def test_image_turned_by_exif_is_refused(self):
+        import struct
+
+        data, rgb, tiff, png, jpeg = self.images()
+        exif = b"Exif\0\0MM\0*\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0\x06\0\0\0\0\0\0"
+        turned = jpeg[:2] + b"\xff\xe1" + struct.pack(">H", len(exif) + 2) + exif + jpeg[2:]
+        (self.source / "foto.jpg").write_bytes(turned)
+        (self.source / "obraz.png").write_bytes(png)
+        baseline, _ = self.process()
+        by_format = {facts["format"]: index for index, facts in baseline.documents.items()}
+        area = self.area_of(data, self.HIDDEN)
+        areas = self.draw(baseline, by_format["JPEG"], area)
+        self.add(areas, baseline, by_format["PNG"], area)
+        catalog, results = self.process(areas)
+        self.assertIn(f"položka {by_format['JPEG']}: manual_area_mismatch", self.markdown(catalog))
+        outcome = {source.name: (target, error) for source, target, error in results if source is not None}
+        self.assertIsNone(outcome["foto.jpg"][0])
+        self.assertEqual(outcome["foto.jpg"][1], MANUAL_MISMATCH)
+        self.assertIsNotNone(outcome["obraz.png"][0])
+        self.assertNotIn("ZEBRA", self.fold(self.section(catalog, by_format["PNG"])))
+
+    # -- the collection of persons, mismatches, nothing without areas -------------------------------------------
+
+    @staticmethod
+    def case_pdf(text):
+        with pdf.open() as document:
+            document.new_page(width=420, height=300).insert_text((30, 100), text, fontsize=16)
+            return document.tobytes()
+
+    @unittest.skipUnless(TESSDATA, "chybí SPISREDAKT_TEST_TESSDATA")
+    def test_name_under_an_area_still_teaches_the_surname_elsewhere(self):
+        first = self.case_pdf("Zalobce Jan Prochazka, bytem Praha.")
+        (self.source / "a.pdf").write_bytes(first)
+        (self.source / "b.pdf").write_bytes(self.case_pdf("Svedek Prochazka uvedl, ze byl pritomen."))
+        baseline, _ = self.process()
+        self.assertNotIn("Prochazka", self.markdown(baseline))
+        area = self.area_of(first, "Jan Prochazka")
+        catalog, results = self.process(self.draw(baseline, 1, area))
+        self.assertEqual([error for _, _, error in results], ["", "", ""])
+        text = self.markdown(catalog)
+        # The full name is under the area (and nowhere in the output); the bare surname elsewhere is replaced.
+        self.assertNotIn("Prochazka", text)
+        self.assertRegex(self.section(catalog, 2), r"\[O\d+\]")
+        copy = self.released(results)["b.pdf"]
+        self.assertNotIn("PROCHAZKA", self.fold(self.copy_text(copy)))
+        self.assertTrue(self.released(results)["a.pdf"].is_file())
+
+    @unittest.skipUnless(TESSDATA, "chybí SPISREDAKT_TEST_TESSDATA")
+    def test_mismatch_is_refused_and_the_rest_carries_on(self):
+        from anonymizer.manual import Areas
+
+        (self.source / "a.pdf").write_bytes(self.text_pdf())
+        (self.source / "b.pdf").write_bytes(self.text_pdf())
+        (self.source / "c.txt").write_text("Obycejny text bez udaju.", encoding="utf-8")
+        baseline, _ = self.process()
+        area = (0.1, 0.2, 0.4, 0.3)
+        cases = {}
+        # a file that changed after the areas were drawn
+        areas = self.draw(baseline, 1, area)
+        (self.source / "a.pdf").write_bytes(self.text_pdf(pages=2))
+        cases["changed input"] = (areas, "a.pdf")
+        # a page the document does not have
+        cases["missing page"] = (self.draw(baseline, 2, area, page=4), "b.pdf")
+        # an item without pages
+        cases["not a page format"] = (self.draw(baseline, 3, area), "c.txt")
+        # an item that does not exist
+        absent = Areas()
+        absent.add((2, "7"), baseline.inputs[2][1], 1, area)
+        cases["absent item"] = (absent, "b.pdf")
+        for label, (areas, refused) in cases.items():
+            with self.subTest(label):
+                catalog, results = self.process(areas)
+                outcome = {source.name: (target, error) for source, target, error in results if source is not None}
+                for name, (target, error) in outcome.items():
+                    if name == refused:
+                        self.assertIsNone(target)
+                        self.assertEqual(error, MANUAL_MISMATCH)
+                    else:
+                        self.assertIsNotNone(target, name)
+                        self.assertEqual(error, "")
+                markdown = self.markdown(catalog)
+                self.assertRegex(markdown, r"položka \d+: manual_area_mismatch")
+                self.assertEqual(markdown.count("manual_area_mismatch"), 1)
+                self.assertIn("PLANETARIUM", markdown)
+                self.assertEqual(set(catalog.copies), {1, 2, 3} - {{"a.pdf": 1, "b.pdf": 2, "c.txt": 3}[refused]})
+        # Nothing but the code and the count reached the audit.
+        events = [json.loads(line) for path in self.audit.rglob("events.jsonl")
+                  for line in path.read_text(encoding="utf-8").splitlines()]
+        failures = [event for event in events if event["status"] == "failed"]
+        self.assertTrue(failures)
+        self.assertEqual({event["reason"] for event in failures}, {"manual_area_mismatch"})
+        self.assertTrue(all(event["manual_areas"] == 1 for event in failures))
+
+    @unittest.skipUnless(TESSDATA, "chybí SPISREDAKT_TEST_TESSDATA")
+    def test_without_areas_the_outputs_are_identical(self):
+        from anonymizer.manual import Areas
+
+        (self.source / "a.pdf").write_bytes(self.text_pdf())
+        (self.source / "b.pdf").write_bytes(self.case_pdf("Zalobce Jan Prochazka, tel. 777 123 456."))
+        data, rgb, tiff, png, jpeg = self.images()
+        (self.source / "obraz.png").write_bytes(png)
+        runs = []
+        for areas in (None, Areas()):
+            target = self.root / f"out{len(runs)}"
+            target.mkdir()
+            self.target = target
+            catalog, results = self.process(areas)
+            runs.append((self.markdown(catalog),
+                         {source.name: error for source, _, error in results if source is not None},
+                         {path.name: self.content(path) for path in sorted(target.iterdir())
+                          if path.suffix in {".png", ".pdf"}}))
+        self.assertEqual(runs[0][0], runs[1][0])
+        self.assertEqual(runs[0][1], runs[1][1])
+        self.assertEqual(runs[0][2], runs[1][2])
+        self.assertTrue(runs[0][2])
+
+    @unittest.skipUnless(TESSDATA, "chybí SPISREDAKT_TEST_TESSDATA")
+    def test_coordinates_are_nowhere_on_the_disk(self):
+        (self.source / "a.pdf").write_bytes(self.text_pdf())
+        baseline, _ = self.process()
+        area = self.area_of(self.text_pdf(), self.HIDDEN)
+        catalog, results = self.process(self.draw(baseline, 1, area))
+        events = [json.loads(line) for path in self.audit.rglob("events.jsonl")
+                  for line in path.read_text(encoding="utf-8").splitlines()]
+        counted = [event for event in events if "manual_areas" in event]
+        self.assertEqual({(event["status"], event["manual_areas"]) for event in counted},
+                         {("extracted", 1), ("processing", 1), ("released", 1)})
+        everything = b"".join(path.read_bytes() for path in self.root.rglob("*")
+                              if path.is_file() and path.suffix in {".jsonl", ".txt", ".md", ".json"})
+        for value in area:
+            self.assertNotIn(f"{value:.4f}".encode(), everything)
+        for event in events:
+            self.assertFalse(any(isinstance(item, float) for item in event.values()), event)
+        # The module of the areas has no way to write anything.
+        from anonymizer import manual
+
+        source = Path(manual.__file__).read_text(encoding="utf-8")
+        for forbidden in ("open(", "write", "QSettings", "import logging", "tempfile", "json"):
+            self.assertNotIn(forbidden, source)
+
+    # -- window and drawing -----------------------------------------------------------------------------------
+
+    def drag(self, dialog, start, end):
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+
+        label = dialog.original_image
+        QTest.mousePress(label, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(*start))
+        QTest.mouseMove(label, QPoint(*end))
+        QTest.mouseRelease(label, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(*end))
+
+    def test_drawing_gives_normalized_areas_at_every_zoom(self):
+        from anonymizer import preview
+        from anonymizer.manual import FIXED_NOTE
+
+        (self.source / "a.pdf").write_bytes(self.text_pdf(pages=2))
+        (self.source / "c.txt").write_text("Text.", encoding="utf-8")
+        catalog, _ = self.process(copies=False)
+        dialog = preview.PreviewDialog(catalog)
+        self.addCleanup(dialog.release)
+        dialog.show()
+        self.assertEqual(dialog.note.text(), FIXED_NOTE)
+        self.assertEqual(dialog.note.text(), "Ruční plocha platí jen pro toto místo, stejný údaj jinde ve spisu neodstraní.")
+        dialog.items.setCurrentRow(0)
+        self.assertTrue(dialog.draw_toggle.isEnabled())
+        self.assertFalse(any(button.isEnabled() for button in (dialog.undo, dialog.reset, dialog.use)))
+        # Without the drawing mode a drag draws nothing.
+        self.drag(dialog, (10, 10), (60, 60))
+        self.assertEqual(len(dialog.areas), 0)
+        dialog.draw_toggle.setChecked(True)
+        locator = catalog.documents[1]["locator"]
+        seen = []
+        for zoom_steps in (0, 2, -2):
+            dialog.zoom = preview.ZOOMS.index(1.0)
+            dialog.rezoom(zoom_steps)
+            width, height = dialog.original_image.pixmap().width(), dialog.original_image.pixmap().height()
+            self.drag(dialog, (round(0.1 * width), round(0.2 * height)), (round(0.5 * width), round(0.4 * height)))
+            seen.append(dialog.areas.rectangles(locator, 1)[-1])
+        for rectangle in seen:
+            for value, wanted in zip(rectangle, (0.1, 0.2, 0.5, 0.4)):
+                self.assertAlmostEqual(value, wanted, delta=0.01)
+        # A drag against the direction and over the edge is clipped; under 2x2 pixels is ignored.
+        self.drag(dialog, (width + 40, height + 40), (width - 50, height - 50))
+        self.assertTrue(all(0 <= value <= 1 for value in dialog.areas.rectangles(locator, 1)[-1]))
+        before = len(dialog.areas)
+        self.drag(dialog, (30, 30), (31, 31))
+        self.assertEqual(len(dialog.areas), before)
+        # Another page and undo / clear.
+        dialog.number.setValue(2)
+        self.drag(dialog, (20, 20), (80, 80))
+        self.assertEqual(len(dialog.areas.rectangles(locator, 2)), 1)
+        self.assertEqual(len(dialog.areas.rectangles(locator, 1)), before)
+        dialog.undo.click()
+        self.assertEqual((len(dialog.areas.rectangles(locator, 2)), len(dialog.areas)), (0, before))
+        dialog.reset.click()
+        self.assertEqual(len(dialog.areas), 0)
+        self.assertFalse(dialog.use.isEnabled())
+        # A text item cannot be drawn on.
+        dialog.items.setCurrentRow(1)
+        self.assertFalse(dialog.draw_toggle.isEnabled())
+        self.assertFalse(dialog.original_image.drawing)
+        self.drag(dialog, (10, 10), (60, 60))
+        self.assertEqual(len(dialog.areas), 0)
+        # "Použít" closes the window with the request.
+        dialog.items.setCurrentRow(0)
+        dialog.draw_toggle.setChecked(True)
+        self.drag(dialog, (10, 10), (60, 60))
+        self.assertTrue(dialog.use.isEnabled())
+        dialog.use.click()
+        self.assertTrue(dialog.apply_requested)
+        self.assertFalse(dialog.isVisible())
+
+    def test_window_repeats_the_batch_with_areas_and_drops_them_with_the_catalog(self):
+        from types import SimpleNamespace
+        from PySide6.QtCore import QSettings
+        from anonymizer import gui, preview
+        from anonymizer.manual import Areas, DISCARD_NOTE, REPEAT_NOTE
+
+        (self.source / "a.pdf").write_bytes(self.text_pdf())
+        catalog, _ = self.process(copies=False)
+        ini = str(self.root / "settings.ini")
+        with mock.patch("anonymizer.gui.QSettings", lambda *args: QSettings(ini, QSettings.Format.IniFormat)):
+            window = gui.Window()
+        window.timer.stop()
+        window.source, window.output = str(self.source), str(self.target)
+        window.catalog = catalog
+        window.areas = self.draw(catalog, 1, (0.1, 0.1, 0.4, 0.2))
+        window.last_run = (self.source, self.target, [self.source / "a.pdf"])
+        with mock.patch("anonymizer.gui.BatchWorker") as worker:
+            window.rerun()
+            worker.assert_called_once()
+            self.assertIs(worker.call_args.kwargs["manual_areas"], window.areas)
+            self.assertEqual(worker.call_args.args[4], [self.source / "a.pdf"])
+        self.assertIs(window.worker, worker.return_value)
+        window.worker = None
+        # Another batch, a changed folder or "forget" drop the areas and say so with one fixed sentence.
+        window.areas = self.draw(catalog, 1, (0.1, 0.1, 0.4, 0.2))
+        window.forget_catalog()
+        self.assertIsNone(window.areas)
+        self.assertIn(DISCARD_NOTE, window.log.toPlainText())
+        # The worker announces the repeated processing with a fixed sentence.
+        messages = []
+        worker = gui.BatchWorker(str(self.source), str(self.target), None, None, [], copies=False,
+                                 manual_areas=self.draw(catalog, 1, (0.1, 0.1, 0.4, 0.2)))
+        worker.result.connect(messages.append)
+        with mock.patch("anonymizer.gui.process_folders", return_value=iter(())):
+            worker.run()
+        self.assertEqual(messages[:1], [REPEAT_NOTE])
+        self.assertEqual(REPEAT_NOTE, "Ruční plochy platí jen pro toto zpracování. "
+                                      "Starší výstup bez nich zůstal ve výstupní složce, nesdílejte ho.")
+
+    def test_mismatch_message_is_a_fixed_text_with_a_code(self):
+        from anonymizer.reasons import PREVIEW_MESSAGES
+
+        self.assertEqual(reason_code(ValueError(MANUAL_MISMATCH)), "manual_area_mismatch")
+        self.assertIn("manual_area_mismatch", ADVICE)
+        self.assertEqual(advice(MANUAL_MISMATCH), ADVICE["manual_area_mismatch"])
+        self.assertTrue(MANUAL_MISMATCH.endswith("."))
+        self.assertTrue(set(PREVIEW_MESSAGES))
 
 
 if __name__ == "__main__":
