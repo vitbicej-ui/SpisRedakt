@@ -73,6 +73,9 @@ class Document:
     footers: "list[str]" = field(repr=False)
     parent: "int | None" = None
     date: "str | None" = None
+    # (input_id, chain of ZIP member orders such as "2/1") of an item read from an input or ZIP; None for
+    # e-mail attachments. The input_id is filled in by the batch. Only for the in-memory preview.
+    locator: "tuple | None" = None
 
 
 @dataclass
@@ -1220,7 +1223,7 @@ class _Limited:
         return data
 
 
-def _item(ctx, path, hint, parent, zip_depth, depth, unsupported):
+def _item(ctx, path, hint, parent, zip_depth, depth, unsupported, locator=()):
     """Extract one file; yields its Document or Skipped (and those of its children)."""
     suffix = None
     try:
@@ -1232,7 +1235,7 @@ def _item(ctx, path, hint, parent, zip_depth, depth, unsupported):
         if path.stat().st_size > size_limit(suffix):
             raise _Skip("size_limit")
         if suffix == ".zip":
-            yield from _zip(ctx, path, parent, zip_depth, depth)
+            yield from _zip(ctx, path, parent, zip_depth, depth, locator)
             return
         result = _extract(ctx, path, suffix)
     except _Abort:
@@ -1244,7 +1247,8 @@ def _item(ctx, path, hint, parent, zip_depth, depth, unsupported):
         return
     index = ctx.next_index()
     ctx.items += 1
-    yield Document(index, _format_name(suffix), result.pages, result.headers, result.footers, parent, result.date)
+    yield Document(index, _format_name(suffix), result.pages, result.headers, result.footers, parent, result.date,
+                   None if locator is None else (0, "/".join(map(str, locator))))
     ctx.tick()
     for supplier, child_hint in result.children:
         target = ctx.new_path(child_hint)
@@ -1254,12 +1258,12 @@ def _item(ctx, path, hint, parent, zip_depth, depth, unsupported):
                 continue
             target.write_bytes(data)
             del data
-            yield from _item(ctx, target, child_hint, index, zip_depth, depth + 1, "attachment_unsupported")
+            yield from _item(ctx, target, child_hint, index, zip_depth, depth + 1, "attachment_unsupported", None)
         finally:
             target.unlink(missing_ok=True)
 
 
-def _zip(ctx, path, parent, zip_depth, depth):
+def _zip(ctx, path, parent, zip_depth, depth, locator=()):
     def skipped(name, code):
         ctx.items += 1
         return Skipped(ctx.next_index(), name, code)
@@ -1273,6 +1277,7 @@ def _zip(ctx, path, parent, zip_depth, depth):
         yield skipped("ZIP", _failure(error))
         return
     with archive:
+        order = 0
         for entry in archive.infolist():
             ctx.budget[0] -= entry.file_size
             ctx.budget[1] -= 1
@@ -1281,6 +1286,8 @@ def _zip(ctx, path, parent, zip_depth, depth):
                 return
             if entry.is_dir():
                 continue
+            # Counted like redact_archive does (every member but directories), so the preview finds it again.
+            order += 1
             if entry.flag_bits & 1:
                 yield skipped("UNKNOWN", "archive_encrypted")
                 continue
@@ -1296,7 +1303,8 @@ def _zip(ctx, path, parent, zip_depth, depth):
                 except Exception as error:
                     yield skipped("UNKNOWN", _failure(error))
                     continue
-                yield from _item(ctx, target, hint, parent, zip_depth + 1, depth + 1, "archive_member_unsupported")
+                yield from _item(ctx, target, hint, parent, zip_depth + 1, depth + 1, "archive_member_unsupported",
+                                 None if locator is None else (*locator, order))
             finally:
                 target.unlink(missing_ok=True)
 

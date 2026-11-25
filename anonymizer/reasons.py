@@ -162,3 +162,19 @@ def advice(message):
     if "PermissionError" in text:
         return PERMISSION_ADVICE
     return GENERAL_ADVICE
+
+
+# Fixed texts of the preview window (preview.py). They never contain a name, path or content of a document.
+PREVIEW_MESSAGES = {
+    "preview_input_changed": "Vstupní soubor se od zpracování změnil nebo zmizel. Zpracujte spis znovu.",
+    "preview_markdown_missing": "Markdown nebyl vydán, výstup nelze zobrazit.",
+    "preview_section_missing": "Sekce tohoto dokumentu ve vydaném Markdownu nebyla nalezena.",
+    "preview_no_original": "Originál přílohy e-mailu nebo vloženého obrázku se v náhledu nezobrazuje.",
+    "preview_not_page": "Originál tohoto formátu se v náhledu nezobrazuje. Otevřete jej v původním programu.",
+    "preview_page_too_large": "Stránka je příliš velká pro náhled.",
+    "preview_no_page": "Tato strana v dokumentu není.",
+    "preview_no_copy": "Kontrolní kopie této položky neexistuje.",
+    "preview_failed": "Náhled se nepodařilo zobrazit.",
+    "preview_unprocessed": "Položka nebyla zpracována.",
+    "preview_encrypted": "PDF je šifrované nebo poškozené, náhled nelze zobrazit.",
+}

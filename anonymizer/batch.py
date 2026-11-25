@@ -19,13 +19,16 @@ RELEASE_CHECK = ("markdown_release_check", "Kontrola výstupu našla možný oso
 
 
 def process_folders(input_root, output_root, tessdata=None, audit_root=None, audit_ready=None, selected=None,
-                    markdown=False, copies=True, split=False, progress=None, summary=None):
+                    markdown=False, copies=True, split=False, progress=None, summary=None, catalog=None):
     """Process every input in two phases and yield ``(source, destination, error)``.
 
     Phase 1 reads all inputs and registers every person of the whole case file in one ``Rules``.
     Then the Markdown file (``markdown``) is written, checked and released as
     ``(None, path_or_None, error)``, and the anonymized copies (``copies``) follow, one tuple per input.
     ``summary(dict)`` is called once about the Markdown (path, documents, tokens, skipped, error).
+    ``catalog(dict)`` (memory only, for the preview) is called with ``{"documents": {Dn: facts}, "inputs":
+    {input_id: (path, signature)}}`` after phase 1, ``{"markdown": path_or_None, "split": bool}`` after the
+    Markdown and ``{"copy": (input_id, path)}`` for every released copy. It never changes any output.
     """
     audit = Audit(audit_root) if audit_root is not None else None
     completed = False
@@ -34,7 +37,7 @@ def process_folders(input_root, output_root, tessdata=None, audit_root=None, aud
             audit.on_fallback = audit_ready
             audit_ready(audit.path, audit.fallback)
         yield from _process_folders(input_root, output_root, tessdata, audit, selected,
-                                    markdown, copies, split, progress, summary)
+                                    markdown, copies, split, progress, summary, catalog)
         completed = True
     finally:
         if audit:
@@ -74,16 +77,26 @@ def failure_code(error):
     return "processing_error" if code == "other" else code
 
 
-def collect_documents(sources, rules, tessdata, progress, audit):
+def input_signature(source):
+    """Size and modification time of an input; the preview refuses an input that changed since."""
+    try:
+        stat = Path(source).stat()
+    except OSError:
+        return None
+    return stat.st_size, stat.st_mtime_ns
+
+
+def collect_documents(sources, rules, tessdata, progress, audit, catalog=None):
     """Phase 1: extract every input into memory (numbered D1..Dn across the batch) and register all labels."""
     from . import extract, markdown as md
 
-    documents, origin = [], {}
+    documents, origin, signatures = [], {}, {}
     offset = base_items = base_pages = 0
     for input_id, source in enumerate(sources, 1):
         found = []
         raised = []
         last = [0, 0]
+        signatures[input_id] = (source, input_signature(source))
 
         def relay(items, pages):
             last[:] = items, pages
@@ -113,7 +126,8 @@ def collect_documents(sources, rules, tessdata, progress, audit):
         for item in found:
             if isinstance(item, extract.Document):
                 item = dataclasses.replace(item, index=item.index + offset,
-                                           parent=None if item.parent is None else item.parent + offset)
+                                           parent=None if item.parent is None else item.parent + offset,
+                                           locator=None if item.locator is None else (input_id, item.locator[1]))
             else:
                 item = dataclasses.replace(item, index=item.index + offset)
             origin[item.index] = input_id
@@ -124,7 +138,21 @@ def collect_documents(sources, rules, tessdata, progress, audit):
                          documents=sum(isinstance(i, extract.Document) for i in found),
                          skipped=sum(isinstance(i, extract.Skipped) for i in found))
     md.collect(documents, rules)
+    if catalog:
+        catalog(dict(documents=_facts(documents), inputs=signatures))
     return documents, origin
+
+
+def _facts(documents):
+    """What the preview may know about each item: format, page count, parent, locator and the code of a skip."""
+    facts = {}
+    for item in documents:
+        if hasattr(item, "pages"):
+            facts[item.index] = dict(format=item.format, pages=sum(page.number is not None for page in item.pages),
+                                     parent=item.parent, locator=item.locator, code=None)
+        else:
+            facts[item.index] = dict(format=item.format, pages=0, parent=None, locator=None, code=item.code)
+    return facts
 
 
 def release_values(rules):
@@ -189,7 +217,7 @@ def publish_markdown(output, target_root, rules):
 
 
 def _process_folders(input_root, output_root, tessdata, audit, selected, markdown=False, copies=True,
-                     split=False, progress=None, summary=None):
+                     split=False, progress=None, summary=None, catalog=None):
     source_root = Path(input_root).resolve(strict=True)
     target_root = Path(output_root).resolve(strict=True)
     if source_root == target_root or source_root in target_root.parents or target_root in source_root.parents:
@@ -204,16 +232,20 @@ def _process_folders(input_root, output_root, tessdata, audit, selected, markdow
     rules = Rules(label_map=label_map)
     try:
         yield from _release(sources, source_root, target_root, rules, tessdata, audit, markdown, copies, split,
-                            progress, summary)
+                            progress, summary, catalog)
     finally:
         if label_map:
             label_map.save(rules.counts)
 
 
-def _release(sources, source_root, target_root, rules, tessdata, audit, markdown, copies, split, progress, summary):
-    documents, _ = collect_documents(sources, rules, tessdata, progress, audit)
+def _release(sources, source_root, target_root, rules, tessdata, audit, markdown, copies, split, progress, summary,
+             catalog=None):
+    documents, _ = collect_documents(sources, rules, tessdata, progress, audit, catalog)
     if markdown:
-        yield from _markdown(documents, rules, target_root, audit, split, summary)
+        for item in _markdown(documents, rules, target_root, audit, split, summary):
+            if catalog:
+                catalog(dict(markdown=item[1], split=split))
+            yield item
     if not copies:
         return
     for index, source in enumerate(sources, 1):
@@ -273,6 +305,8 @@ def _release(sources, source_root, target_root, rules, tessdata, audit, markdown
                 audit.record("released", phase=phase, code="pipeline_passed", attempts=attempts,
                              fallback="numbered_filename" if collisions else None,
                              collisions=collisions, **fields, **extra)
+            if catalog:
+                catalog(dict(copy=(index, destination)))
             yield source, destination, ""
 
 

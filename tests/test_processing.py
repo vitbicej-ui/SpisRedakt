@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
+from email.message import EmailMessage
 from zipfile import ZipFile
 
 from docx import Document
@@ -1711,7 +1712,7 @@ class SurnameTests(unittest.TestCase):
         self.assertNotIn("Wolf", rules.surfaces["NAROZENI"])
         # No label, message or audit field can carry them: the strings are only ever read from memory.
         base = Path(czech.__file__).parent
-        for name in ("audit.py", "reasons.py", "gui.py"):
+        for name in ("audit.py", "reasons.py", "gui.py", "preview.py"):
             self.assertNotIn("surfaces", (base / name).read_text(encoding="utf-8"), name)
         from anonymizer.reasons import ADVICE, REASONS
         found = " ".join([text for text in ADVICE.values()] + [str(item) for item in REASONS])
@@ -2427,6 +2428,438 @@ class OfficeConversionTests(unittest.TestCase):
         with mock.patch("os.path.isfile", return_value=False), mock.patch("shutil.which") as which:
             self.assertIsNone(self.legacy.find_office())
         which.assert_not_called()
+
+
+class PreviewTests(unittest.TestCase):
+    """The in-memory preview: catalog, locators, rendering, fixed messages, nothing written."""
+
+    TESSDATA = os.environ.get("SPISREDAKT_TEST_TESSDATA")
+
+    def setUp(self):
+        from PySide6.QtWidgets import QApplication
+
+        self.app = QApplication.instance() or QApplication([])
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        self.source, self.target, self.audit = (self.root / name for name in ("in", "out", "audit"))
+        self.source.mkdir()
+        self.target.mkdir()
+
+    @staticmethod
+    def pdf_bytes(*pages):
+        with pdf.open() as document:
+            for text in pages:
+                document.new_page().insert_text((72, 100), text, fontsize=14)
+            return document.tobytes()
+
+    def build_zip(self):
+        word = io.BytesIO()
+        document = Document()
+        document.add_paragraph("Smlouvu uzavřela Karolína Bílá, telefon 777 123 456.")
+        document.save(word)
+        inner = io.BytesIO()
+        self.inner_pdf = self.pdf_bytes("Vnořený dokument Jan Novotný, telefon 602 111 222, bytem Praha.")
+        with ZipFile(inner, "w") as archive:
+            archive.writestr("vnorene_novotny.pdf", self.inner_pdf)
+        message = EmailMessage()
+        message["From"] = "jan.novotny@example.test"
+        message["To"] = "archiv@example.test"
+        message["Subject"] = "Doklady"
+        message.set_content("Posílám přílohu, telefon 602 333 444.")
+        message.add_attachment(self.pdf_bytes("Příloha e-mailu Karel Dvořák, telefon 602 555 666."),
+                               maintype="application", subtype="pdf", filename="priloha_dvorak.pdf")
+        self.outer_pdf = self.pdf_bytes("Žalobce Jan Novotný, telefon 777 123 456, bytem Praha.",
+                                        "Druhá strana, Jan Novotný znovu.")
+        with ZipFile(self.source / "spis_novotny.zip", "w") as archive:
+            archive.writestr("slozka_novotny/", b"")
+            archive.writestr("sifra_novotny.txt", b"zasifrovano")
+            archive.writestr("neznamy_novotny.bin", b"unknown")
+            archive.writestr("smlouva_novotny.pdf", self.outer_pdf)
+            archive.writestr("vnorene_novotny.zip", inner.getvalue())
+            archive.writestr("text_novotny.docx", word.getvalue())
+            archive.writestr("posta_novotny.eml", message.as_bytes())
+
+    @staticmethod
+    def marked_infolist():
+        original = ZipFile.infolist
+
+        def marked(archive):
+            result = original(archive)
+            for info in result:
+                if info.filename == "sifra_novotny.txt":
+                    info.flag_bits |= 1
+            return result
+
+        return mock.patch.object(ZipFile, "infolist", marked)
+
+    def run_batch(self, **kwargs):
+        from anonymizer.preview import Catalog
+
+        catalog = Catalog()
+        options = dict(markdown=True, copies=True)
+        options.update(kwargs)
+        with self.marked_infolist():
+            results = list(process_folders(self.source, self.target, audit_root=self.audit,
+                                           catalog=catalog.update, **options))
+        return catalog, results
+
+    def render_direct(self, data, number=1, zoom=1.0, suffix=".pdf"):
+        from anonymizer import preview
+
+        return preview.render(data, suffix, number, zoom)[0]
+
+    def test_catalog_locators_and_rendering(self):
+        from anonymizer import preview
+
+        self.build_zip()
+        catalog, results = self.run_batch()
+        facts = catalog.documents
+        self.assertEqual(sorted(facts), [1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual((facts[1]["code"], facts[2]["code"]), ("archive_encrypted", "archive_member_unsupported"))
+        # Directories are not counted; encrypted and rejected members are.
+        self.assertEqual(facts[3]["locator"], (1, "3"))
+        self.assertEqual(facts[4]["locator"], (1, "4/1"))
+        self.assertEqual(facts[5]["locator"], (1, "5"))
+        self.assertEqual(facts[6]["locator"], (1, "6"))
+        self.assertIsNone(facts[7]["locator"])
+        self.assertEqual(facts[7]["parent"], 6)
+        self.assertEqual((facts[3]["format"], facts[3]["pages"]), ("PDF", 2))
+        self.assertEqual(catalog.markdown, results[0][1])
+        self.assertEqual(list(catalog.copies), [1])
+        model = preview.Model(catalog)
+        self.assertEqual(model.label(3), "D3 (PDF, 2 s.)")
+        self.assertEqual(model.label(1), "D1 – nezpracováno")
+        self.assertEqual(model.label(7), "D7 (PDF, 1 s., příloha D6)")
+        # The page of a nested member equals rendering it directly.
+        self.assertEqual(model.original(3, 2, 1.0)[0], self.render_direct(self.outer_pdf, 2))
+        image, count = model.original(4, 1, 1.0)
+        self.assertEqual(image, self.render_direct(self.inner_pdf))
+        self.assertEqual(count, 1)
+        self.assertGreater(model.original(3, 1, 2.0)[0].width(), model.original(3, 1, 1.0)[0].width())
+        # Fixed refusals.
+        cases = ((model.original, (1, 1, 1.0), "preview_unprocessed"),
+                 (model.original, (5, 1, 1.0), "preview_not_page"),
+                 (model.original, (6, 1, 1.0), "preview_not_page"),
+                 (model.original, (7, 1, 1.0), "preview_no_original"),
+                 (model.original, (3, 3, 1.0), "preview_no_page"),
+                 (model.copy, (7, 1, 1.0), "preview_no_copy"),
+                 (model.copy, (1, 1, 1.0), "preview_no_copy"))
+        for call, arguments, code in cases:
+            with self.subTest(code=code, arguments=arguments), self.assertRaises(preview.PreviewError) as raised:
+                call(*arguments)
+            self.assertEqual(raised.exception.code, code)
+        # The output section is the released one: labels instead of values, one section only.
+        section = model.text(3)
+        self.assertTrue(section.startswith("## D3 (PDF, 2 s.)"))
+        self.assertIn("[s. 2]", section)
+        self.assertRegex(section, r"\[O\d+\]")
+        self.assertNotIn("Novotný", section)
+        self.assertNotIn("## D4", section)
+        self.assertIn(ADVICE["archive_encrypted"], model.text(1))
+        # The control copy shows the page of the released copy, also from a nested archive.
+        self.assertTrue(model.has_copy(3) and model.has_copy(4))
+        self.assertFalse(any(model.has_copy(index) for index in (1, 2, 5, 6, 7)))
+        for index in (3, 4):
+            image, _ = model.copy(index, 1, 1.0)
+            self.assertFalse(image.isNull())
+        with ZipFile(catalog.copies[1]) as archive:
+            released = archive.read("polozka-0003.pdf")
+        self.assertEqual(model.copy(3, 1, 1.0)[0], self.render_direct(released))
+
+    def test_dialog_shows_no_names_and_fixed_texts(self):
+        from anonymizer import preview
+
+        self.build_zip()
+        catalog, _ = self.run_batch()
+        dialog = preview.PreviewDialog(catalog)
+        self.addCleanup(dialog.release)
+        self.assertEqual(dialog.windowTitle(), "SpisRedakt – náhled")
+        self.assertEqual(dialog.original_title.text(), "Originál – obsahuje osobní údaje")
+        seen = []
+        for row in range(dialog.items.count()):
+            dialog.items.setCurrentRow(row)
+            seen += [dialog.items.item(row).text(), dialog.original_image.text(), dialog.copy_image.text(),
+                     dialog.text.toPlainText(), dialog.output_title.text(), dialog.count.text()]
+            if row + 1 in (3, 4):
+                self.assertFalse(dialog.original_image.pixmap().isNull())
+                self.assertTrue(dialog.copy_toggle.isEnabled())
+                dialog.copy_toggle.setChecked(True)
+                self.assertFalse(dialog.copy_image.pixmap().isNull())
+                self.assertEqual(dialog.output_title.text(), "Kontrolní kopie")
+                dialog.copy_toggle.setChecked(False)
+            else:
+                self.assertFalse(dialog.copy_toggle.isEnabled())
+        everything = "\n".join(seen)
+        self.assertRegex(everything, r"\[O\d+\]")
+        for forbidden in ("novotny", "novotný", "dvorak", "dvořák", "smlouva", "sifra", "neznamy", "posta",
+                          str(self.root).lower()):
+            self.assertNotIn(forbidden, everything.lower(), forbidden)
+        # Paging, zoom and the shift of the output to [s. N].
+        dialog.items.setCurrentRow(2)
+        self.assertEqual((dialog.number.maximum(), dialog.count.text()), (2, "/ 2"))
+        self.assertFalse(dialog.previous.isEnabled())
+        dialog.following.click()
+        self.assertEqual(dialog.number.value(), 2)
+        self.assertTrue(dialog.text.textCursor().selectedText().startswith("[s. 2]"))
+        self.assertFalse(dialog.following.isEnabled())
+        before = dialog.original_image.pixmap().width()
+        dialog.larger.click()
+        self.assertGreater(dialog.original_image.pixmap().width(), before)
+        # A label is highlighted in the output.
+        dialog.text.setPlainText("Text [O1] a [RC2].")
+        dialog.highlighter.rehighlight()
+        formats = dialog.text.document().firstBlock().layout().formats()
+        self.assertEqual(len(formats), 2)
+
+    def test_nothing_is_written_and_results_are_unchanged(self):
+        import builtins
+        import tempfile as tempfile_module
+        from PySide6.QtCore import QSettings
+        from anonymizer.gui import Window
+
+        self.build_zip()
+        catalog, _ = self.run_batch()
+        ini = str(self.root / "settings.ini")
+
+        def listing():
+            return sorted((str(path.relative_to(self.root)), path.stat().st_size)
+                          for path in self.root.rglob("*") if path.is_file())
+
+        def state():
+            return listing(), next(self.audit.glob("*/events.jsonl")).read_text()
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("preview wrote to the disk")
+
+        real_open, real_io_open = builtins.open, io.open
+
+        def guard(real):
+            def guarded(file, mode="r", *args, **kwargs):
+                if set(mode) & set("wax+"):
+                    raise AssertionError("preview opened a file for writing")
+                return real(file, mode, *args, **kwargs)
+            return guarded
+
+        with mock.patch("anonymizer.gui.QSettings", lambda *args: QSettings(ini, QSettings.Format.IniFormat)):
+            window = Window()
+        window.timer.stop()
+        window.catalog = catalog
+        window.preview_button.setEnabled(True)
+        before = state()
+        with mock.patch.object(builtins, "open", guard(real_open)), mock.patch.object(io, "open", guard(real_io_open)), \
+                mock.patch.object(Path, "write_text", forbidden), mock.patch.object(Path, "write_bytes", forbidden), \
+                mock.patch.object(Path, "mkdir", forbidden), mock.patch.object(Path, "touch", forbidden), \
+                mock.patch.object(tempfile_module, "mkstemp", forbidden), \
+                mock.patch.object(tempfile_module, "mkdtemp", forbidden), \
+                mock.patch.object(tempfile_module, "NamedTemporaryFile", forbidden), \
+                mock.patch.object(tempfile_module, "TemporaryFile", forbidden), \
+                mock.patch.object(tempfile_module, "TemporaryDirectory", forbidden), \
+                mock.patch.object(tempfile_module, "SpooledTemporaryFile", forbidden), \
+                mock.patch.object(QSettings, "setValue", forbidden), mock.patch.object(QSettings, "sync", forbidden):
+            window.open_preview()
+            dialog = window.preview
+            self.assertIsNotNone(dialog)
+            for row in range(dialog.items.count()):
+                dialog.items.setCurrentRow(row)
+                if dialog.copy_toggle.isEnabled():
+                    dialog.copy_toggle.setChecked(True)
+                dialog.following.click()
+                dialog.larger.click()
+            dialog.close()
+        self.assertIsNone(window.preview)
+        self.assertEqual(before, state())
+        self.assertEqual(dialog.model.cache, {})
+
+    def test_outputs_are_identical_with_and_without_catalog(self):
+        import json
+
+        self.build_zip()
+        runs = []
+        for name, wanted in (("with", True), ("without", False)):
+            target = self.root / name
+            target.mkdir()
+            audit = self.root / f"audit-{name}"
+            catalog = []
+            with self.marked_infolist():
+                results = list(process_folders(self.source, target, audit_root=audit, markdown=True, copies=True,
+                                               catalog=catalog.append if wanted else None))
+            self.assertEqual(bool(catalog), wanted)
+            markdown = results[0][1].read_text(encoding="utf-8")
+            with ZipFile(results[1][1]) as archive:
+                names = archive.namelist()
+                note = archive.read("NEZPRACOVANO.txt")
+            log = [{key: value for key, value in json.loads(line).items() if key not in ("run_id", "utc")}
+                   for line in next(audit.glob("*/events.jsonl")).read_text().splitlines()]
+            runs.append((markdown, names, note, log))
+        self.assertEqual(runs[0], runs[1])
+
+    def test_changed_missing_and_unissued_inputs_give_fixed_messages(self):
+        from anonymizer import preview
+
+        self.build_zip()
+        catalog, _ = self.run_batch()
+        model = preview.Model(catalog)
+        self.assertFalse(model.original(3, 1, 1.0)[0].isNull())
+        archive_path = self.source / "spis_novotny.zip"
+        archive_path.write_bytes(archive_path.read_bytes() + b"x")
+        with self.assertRaises(preview.PreviewError) as raised:
+            model.original(3, 1, 1.0)
+        self.assertEqual(raised.exception.code, "preview_input_changed")
+        # The output is still there.
+        self.assertIn("[s. 2]", model.text(3))
+        archive_path.unlink()
+        with self.assertRaises(preview.PreviewError) as raised:
+            model.original(4, 1, 1.0)
+        self.assertEqual(raised.exception.code, "preview_input_changed")
+        # Markdown not released: the original is still shown, the output is a fixed message.
+        catalog.markdown = None
+        with self.assertRaises(preview.PreviewError) as raised:
+            model.text(3)
+        self.assertEqual(raised.exception.code, "preview_markdown_missing")
+        dialog = preview.PreviewDialog(catalog)
+        self.addCleanup(dialog.release)
+        dialog.items.setCurrentRow(2)
+        self.assertEqual(dialog.text.toPlainText(), preview.PREVIEW_MESSAGES["preview_markdown_missing"])
+        self.assertEqual(dialog.original_image.text(), preview.PREVIEW_MESSAGES["preview_input_changed"])
+
+    def test_split_markdown_and_plain_inputs(self):
+        from anonymizer import preview
+
+        (self.source / "sken.pdf").write_bytes(self.pdf_bytes("Žalobce Jan Novotný, telefon 777 123 456."))
+        word = Document()
+        word.add_paragraph("Text bez údajů.")
+        word.save(self.source / "rozsudek.docx")
+        catalog, results = self.run_batch(split=True)
+        self.assertTrue(catalog.split)
+        self.assertTrue(catalog.markdown.is_dir())
+        model = preview.Model(catalog)
+        by_format = {facts["format"]: index for index, facts in catalog.documents.items()}
+        self.assertTrue(model.text(by_format["PDF"]).startswith(f"## D{by_format['PDF']} (PDF"))
+        self.assertEqual(model.original(by_format["PDF"], 1, 1.0)[0],
+                         self.render_direct((self.source / "sken.pdf").read_bytes()))
+        self.assertFalse(model.copy(by_format["PDF"], 1, 1.0)[0].isNull())
+        with self.assertRaises(preview.PreviewError) as raised:
+            model.original(by_format["DOCX"], 1, 1.0)
+        self.assertEqual(raised.exception.code, "preview_not_page")
+
+    def test_failures_show_only_fixed_texts(self):
+        from anonymizer import preview
+
+        self.build_zip()
+        catalog, _ = self.run_batch()
+        dialog = preview.PreviewDialog(catalog)
+        self.addCleanup(dialog.release)
+        with mock.patch.object(preview, "render", side_effect=RuntimeError("Jan Novotný 777 123 456")):
+            dialog.items.setCurrentRow(2)
+            dialog.larger.click()
+        self.assertEqual(dialog.original_image.text(), preview.PREVIEW_MESSAGES["preview_failed"])
+        with mock.patch.object(preview, "MAX_PIXELS", 1000):
+            dialog.larger.click()
+        self.assertEqual(dialog.original_image.text(), preview.PREVIEW_MESSAGES["preview_page_too_large"])
+        with pdf.open() as document:
+            document.new_page()
+            locked = document.tobytes(encryption=pdf.PDF_ENCRYPT_AES_256, user_pw="a", owner_pw="b")
+        for data, code in ((locked, "preview_encrypted"), (b"not a pdf", "preview_not_page"),
+                           (b"%PDF-1.4 broken", "preview_encrypted")):
+            with self.subTest(code=code), self.assertRaises(preview.PreviewError) as raised:
+                preview.render(data, ".pdf", 1, 1.0)
+            self.assertEqual(raised.exception.code, code)
+
+    def test_window_buttons_and_scan_while_preview_is_open(self):
+        from types import SimpleNamespace
+        from PySide6.QtCore import QSettings
+        from anonymizer import preview
+        from anonymizer.gui import Window
+
+        self.build_zip()
+        catalog, _ = self.run_batch()
+        ini = str(self.root / "settings.ini")
+        with mock.patch("anonymizer.gui.QSettings", lambda *args: QSettings(ini, QSettings.Format.IniFormat)):
+            window = Window()
+        window.timer.stop()
+        self.assertFalse(window.preview_button.isEnabled())
+        # Enabled only after a batch that finished in this run and had items.
+        for complete, shown, enabled in ((False, catalog, False), (True, preview.Catalog(), False),
+                                         (True, catalog, True)):
+            window.worker = SimpleNamespace(complete=complete, catalog=shown, deleteLater=lambda: None)
+            window.finished()
+            self.assertEqual(window.preview_button.isEnabled(), enabled)
+        # A running batch blocks it.
+        window.worker = object()
+        window.open_preview()
+        self.assertIsNone(window.preview)
+        window.worker = None
+        window.source, window.output = str(self.root / "pin"), str(self.root / "pout")
+        (self.root / "pin").mkdir()
+        (self.root / "pout").mkdir()
+        (self.root / "pin" / "a.txt").write_text("Text.", encoding="utf-8")
+        window.open_preview()
+        self.assertIsNotNone(window.preview)
+        with mock.patch("anonymizer.gui.BatchWorker") as worker:
+            window.scan()
+            window.scan()
+            worker.assert_not_called()
+            window.preview.close()
+            self.assertIsNone(window.preview)
+            window.scan()
+            window.scan()
+            worker.assert_called_once()
+        # Starting a batch and changing a folder forget the old one.
+        self.assertIsNone(window.catalog)
+        self.assertFalse(window.preview_button.isEnabled())
+        window.worker = None
+        window.catalog = catalog
+        with mock.patch("anonymizer.gui.QFileDialog.getExistingDirectory", return_value=str(self.root / "pin")):
+            window.choose("source", "Vstupní složka")
+        self.assertIsNone(window.catalog)
+
+    @unittest.skipUnless(TESSDATA, "chybí SPISREDAKT_TEST_TESSDATA")
+    def test_scans_and_images_in_nested_archives_match_direct_rendering(self):
+        from anonymizer import preview
+
+        with pdf.open() as document:
+            page = document.new_page(width=400, height=120)
+            page.insert_text((20, 60), "Jan Novák bydlí v Praze", fontsize=22)
+            pixmap = page.get_pixmap(dpi=200, alpha=False, colorspace=pdf.csGRAY)
+        blank = pdf.Pixmap(pixmap.colorspace, pixmap.irect, False)
+        blank.clear_with(255)
+        tiff = self.root / "sken.tif"
+        ProcessingTests.write_tiff(tiff, [pixmap, blank])
+        png = pdf.Pixmap(pdf.csRGB, pixmap).tobytes("png")
+        inner = io.BytesIO()
+        with ZipFile(inner, "w") as archive:
+            archive.writestr("a/", b"")
+            archive.writestr("sken.tif", tiff.read_bytes())
+        with ZipFile(self.source / "spis.zip", "w") as archive:
+            archive.writestr("obrazek.png", png)
+            archive.writestr("vnorene.zip", inner.getvalue())
+        catalog = preview.Catalog()
+        results = list(process_folders(self.source, self.target, tessdata=self.TESSDATA, markdown=True,
+                                       copies=True, catalog=catalog.update))
+        self.assertEqual([error for _, _, error in results], ["", ""])
+        model = preview.Model(catalog)
+        by_format = {facts["format"]: index for index, facts in catalog.documents.items()}
+        self.assertEqual(catalog.documents[by_format["TIFF"]]["locator"], (1, "2/1"))
+        self.assertEqual(model.original(by_format["PNG"], 1, 1.0)[0], self.render_direct(png, suffix=".png"))
+        image, count = model.original(by_format["TIFF"], 2, 1.0)
+        self.assertEqual(count, 2)
+        self.assertEqual(image, self.render_direct(tiff.read_bytes(), 2, suffix=".tif"))
+        self.assertFalse(model.copy(by_format["TIFF"], 1, 1.0)[0].isNull())
+        self.assertIn("[s. 1]", model.text(by_format["TIFF"]))
+
+    def test_messages_are_fixed_czech_texts_used_by_the_module(self):
+        from anonymizer.reasons import PREVIEW_MESSAGES
+
+        source = (Path(rules_module.__file__).parent / "preview.py").read_text(encoding="utf-8")
+        used = set(re.findall(r'(?:PreviewError|message)\("(preview_[a-z_]+)"', source))
+        self.assertTrue(used)
+        self.assertLessEqual(used, set(PREVIEW_MESSAGES))
+        for code, text in PREVIEW_MESSAGES.items():
+            self.assertTrue(text.endswith("."), code)
+            self.assertNotIn("{", text)
+        for forbidden in ("tempfile", "QSettings", "write_text", "write_bytes", "logging", "audit"):
+            self.assertNotIn(forbidden, source)
 
 
 if __name__ == "__main__":

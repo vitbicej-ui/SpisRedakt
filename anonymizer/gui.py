@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 
 from . import legacy
 from .batch import process_folders
+from .preview import Catalog, PreviewDialog
 from .reasons import ADVICE, GENERAL_ADVICE, advice
 
 
@@ -35,6 +36,9 @@ class BatchWorker(QThread):
         self.copies = copies
         self.split = split
         self.last_progress = 0.0
+        # What the preview may know (memory only); read by the window after the batch finished.
+        self.catalog = Catalog()
+        self.complete = False
 
     def report_progress(self, items, pages):
         # The batch runs in this thread; the interface is updated at most a few times per second.
@@ -71,7 +75,7 @@ class BatchWorker(QThread):
             for source, target, error in process_folders(
                 *self.arguments, audit_root=audit_root, audit_ready=audit_ready, selected=self.selected,
                 markdown=True, copies=self.copies, split=self.split,
-                progress=self.report_progress, summary=self.report_summary,
+                progress=self.report_progress, summary=self.report_summary, catalog=self.catalog.update,
             ):
                 if source is None:
                     continue
@@ -86,6 +90,7 @@ class BatchWorker(QThread):
                 if self.copies:
                     self.result.emit(f"{source.name} → přeskočeno")
                 self.handled.emit(str(source))
+            self.complete = True
         except ValueError as error:
             self.result.emit(str(error))
         except Exception as error:
@@ -98,6 +103,8 @@ class Window(QWidget):
         self.setWindowTitle("SpisRedakt")
         self.resize(760, 510)
         self.worker = None
+        self.preview = None
+        self.catalog = None
         self.settings = QSettings("SpisRedakt", "SpisRedakt")
         self.source = self.settings.value("input", "", str)
         self.output = self.settings.value("output", "", str)
@@ -159,6 +166,10 @@ class Window(QWidget):
         retry.clicked.connect(self.retry)
         self.buttons.append(retry)
         layout.addWidget(retry)
+        self.preview_button = QPushButton("Náhled")
+        self.preview_button.setEnabled(False)
+        self.preview_button.clicked.connect(self.open_preview)
+        layout.addWidget(self.preview_button)
         self.log = QPlainTextEdit(readOnly=True)
         self.log.document().setMaximumBlockCount(500)
         layout.addWidget(self.log, 1)
@@ -188,7 +199,26 @@ class Window(QWidget):
             setattr(self, key, path)
             self.settings.setValue("input" if key == "source" else "output", path)
             self.observed.clear()
+            self.forget_catalog()
             self.refresh_paths()
+
+    def forget_catalog(self):
+        self.catalog = None
+        self.preview_button.setEnabled(False)
+
+    def open_preview(self):
+        """Open the preview of the last finished batch; everything it shows stays in memory."""
+        if self.preview is not None or self.worker is not None or not self.catalog:
+            return
+        self.preview = PreviewDialog(self.catalog, self)
+        self.preview.finished.connect(self.preview_closed)
+        self.preview.open()
+
+    def preview_closed(self):
+        dialog, self.preview = self.preview, None
+        if dialog is not None:
+            dialog.release()
+            dialog.deleteLater()
 
     def retry(self):
         if self.source and self.output:
@@ -197,7 +227,7 @@ class Window(QWidget):
             self.scan()
 
     def scan(self):
-        if self.worker or not self.source or not self.output:
+        if self.worker or self.preview is not None or not self.source or not self.output:
             return
         try:
             source, output = (Path(path).resolve(strict=True) for path in (self.source, self.output))
@@ -226,6 +256,7 @@ class Window(QWidget):
             self.refresh_paths()
             return
         self.pending = pending
+        self.forget_catalog()
         for button in self.buttons:
             button.setEnabled(False)
         self.status.setText(f"Zpracovávám soubory: {len(pending)}")
@@ -247,6 +278,9 @@ class Window(QWidget):
     def finished(self):
         for button in self.buttons:
             button.setEnabled(True)
+        if self.worker.complete and self.worker.catalog.documents:
+            self.catalog = self.worker.catalog
+            self.preview_button.setEnabled(True)
         self.worker.deleteLater()
         self.worker = None
         self.refresh_paths()
@@ -256,6 +290,8 @@ class Window(QWidget):
             self.status.setText("Probíhá zpracování. Okno lze zavřít po dokončení dávky.")
             event.ignore()
         else:
+            if self.preview is not None:
+                self.preview.close()
             super().closeEvent(event)
 
 
