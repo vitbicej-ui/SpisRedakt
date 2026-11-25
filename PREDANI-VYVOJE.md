@@ -206,3 +206,7 @@ Schváleno s úpravou. Důvod: plochy jen přidávají začernění, ale musí p
 - Testy: PDF se slovem, které pravidla nenajdou, plocha přes něj (chybí v Markdownu i OCR kopie, pixely černé, `validate_pdf` projde, slovo mimo plochu zůstane); totéž pro /Rotate 90, posunutý CropBox, 2. stranu TIFF, PNG a JPEG s EXIF orientací 6 (samostatně i ve vnořeném ZIP); celé jméno jen pod plochou + samotné příjmení jinde (příjmení se dál nahradí a kontrola ho zná); změněný vstup → `manual_area_mismatch`, zbytek se vydá; bez ploch jsou výstupy totožné s Náhledem; souřadnice nikde na disku, jiná dávka plochy zahodí; kreslení dává správné normalizované souřadnice i při přiblížení, „Smazat poslední“/„Zrušit vše“.
 - Nesmí se změnit: vše z 14a; plochy jen přidávají (automatická pravidla, kontrola před vydáním, `validate_pdf`, detektor úniků beze změny); formát mapy; existující výstupy se nepřepisují. Bezpečnostně citlivé: před commitem krátká kontrola Opus, nezávislé ověření OCR na syntetické slovo, zelené Windows CI.
 - Pověření vlastníka: viz AUTOMATION.md.
+
+## 17. Náhled v GUI (7a26bd3)
+
+`anonymizer/preview.py` (model bez widgetů + `PreviewDialog`), `process_folders(catalog=)`, `Document.locator`, hlášení `PREVIEW_MESSAGES` v `reasons.py`. Vše jen v paměti; testy `PreviewTests` v `tests/test_processing.py`. Ruční plochy (14b) mohou začít.
