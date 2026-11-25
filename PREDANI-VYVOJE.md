@@ -214,3 +214,7 @@ Schváleno s úpravou. Důvod: plochy jen přidávají začernění, ale musí p
 ## 18. Ruční vyznačení ploch (98a5a43)
 
 `anonymizer/manual.py` (`Areas`, `InputAreas`, `ItemAreas`), `process_folders(manual_areas=)`, `Page.collect_only`, `manual_area_mismatch` v `reasons.py`, ovládání v `PreviewDialog`/`Window`. Plochy jen v paměti; testy `ManualAreaTests`. Obrázek otočený podle EXIF se s plochami odmítá (nesoulad mezi `Pixmap` a vykreslením stránky). Bez ploch jsou výstupy bajtově shodné s předchozí verzí (ověřeno srovnáním).
+
+## 19. Kontrola ručních ploch (25. 11. 2026)
+
+Nezávislá kontrola Opus našla posun `input_id` při opakování (plochy by padly na jiný soubor), chybějící kontrolu podpisu před kopií a EXIF kontrolu podle přípony; opraveno v `78178c6` (plochy nesou i cestu vstupu, jen v paměti). Zbývá ruční zkouška GUI (náhled, kreslení) na Windows.
