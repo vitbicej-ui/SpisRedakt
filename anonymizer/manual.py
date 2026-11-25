@@ -37,12 +37,15 @@ class Areas:
 
     def __init__(self):
         self.items = {}
+        self.paths = {}     # input_id -> path of the input (memory only, never shown or stored)
         self.order = []
 
     def __len__(self):
         return len(self.order)
 
-    def add(self, locator, signature, page, rectangle):
+    def add(self, locator, signature, path, page, rectangle):
+        if self.paths.setdefault(locator[0], path) != path:
+            raise ValueError(MANUAL_MISMATCH)
         key = (locator[0], locator[1])
         entry = self.items.setdefault(key, (signature, {}))
         if entry[0] != signature:
@@ -60,10 +63,13 @@ class Areas:
             del pages[page]
         if not pages:
             del self.items[key]
+        if not any(item[0] == key[0] for item in self.items):
+            self.paths.pop(key[0], None)
         return True
 
     def clear(self):
         self.items.clear()
+        self.paths.clear()
         self.order.clear()
 
     def rectangles(self, locator, page):
@@ -74,7 +80,7 @@ class Areas:
         """``{input_id: InputAreas}`` copied for one processing (later drawing does not change it)."""
         result = {}
         for (input_id, chain), (signature, pages) in self.items.items():
-            view = result.setdefault(input_id, InputAreas(signature))
+            view = result.setdefault(input_id, InputAreas(signature, self.paths[input_id]))
             if view.signature != signature:
                 raise ValueError(MANUAL_MISMATCH)
             view.items[chain] = {page: tuple(rects) for page, rects in pages.items()}
@@ -86,8 +92,8 @@ class Areas:
 class InputAreas:
     """The areas of one input for one processing, with what the phases learned about its pages."""
 
-    def __init__(self, signature):
-        self.signature = signature
+    def __init__(self, signature, path=None):
+        self.signature, self.path = signature, path
         self.items = {}         # chain key -> {page: rectangles}
         self.count = 0
         self.used = set()

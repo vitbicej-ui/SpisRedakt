@@ -2926,7 +2926,7 @@ class ManualAreaTests(unittest.TestCase):
     @staticmethod
     def add(areas, catalog, index, rectangle, page=1):
         locator = catalog.documents[index]["locator"]
-        areas.add(locator, catalog.inputs[locator[0]][1], page, rectangle)
+        areas.add(locator, catalog.inputs[locator[0]][1], catalog.inputs[locator[0]][0], page, rectangle)
         return areas
 
     def draw(self, catalog, index, rectangle, page=1):
@@ -3177,7 +3177,7 @@ class ManualAreaTests(unittest.TestCase):
         cases["not a page format"] = (self.draw(baseline, 3, area), "c.txt")
         # an item that does not exist
         absent = Areas()
-        absent.add((2, "7"), baseline.inputs[2][1], 1, area)
+        absent.add((2, "7"), baseline.inputs[2][1], baseline.inputs[2][0], 1, area)
         cases["absent item"] = (absent, "b.pdf")
         for label, (areas, refused) in cases.items():
             with self.subTest(label):
@@ -3360,6 +3360,62 @@ class ManualAreaTests(unittest.TestCase):
         self.assertEqual(messages[:1], [REPEAT_NOTE])
         self.assertEqual(REPEAT_NOTE, "Ruční plochy platí jen pro toto zpracování. "
                                       "Starší výstup bez nich zůstal ve výstupní složce, nesdílejte ho.")
+
+    def test_areas_follow_their_files_when_the_selection_shifts(self):
+        for name, word in (("a.pdf", "Alfa"), ("b.pdf", "Zelvak"), ("c.pdf", "Kvetak")):
+            with pdf.open() as document:
+                document.new_page().insert_text((72, 100), word, fontsize=20)
+                document.save(self.source / name)
+        for name in ("b.pdf", "c.pdf"):
+            os.utime(self.source / name, ns=(10 ** 18, 10 ** 18))
+        selected = [self.source / name for name in ("a.pdf", "b.pdf", "c.pdf")]
+        from anonymizer.preview import Catalog
+
+        catalog = Catalog()
+        list(process_folders(self.source, self.target, self.TESSDATA, selected=selected, markdown=True,
+                             copies=False, catalog=catalog.update))
+        areas = self.draw(catalog, 2, (0.0, 0.0, 1.0, 0.3))
+        (self.source / "a.pdf").unlink()
+        before = set(self.target.rglob("*"))
+        with self.assertRaises(ValueError) as raised:
+            list(process_folders(self.source, self.target, self.TESSDATA, selected=selected, markdown=True,
+                                 copies=True, manual_areas=areas))
+        self.assertEqual(str(raised.exception), MANUAL_MISMATCH)
+        self.assertEqual(set(self.target.rglob("*")) - before, set())
+
+    @unittest.skipUnless(TESSDATA, "chybí SPISREDAKT_TEST_TESSDATA")
+    def test_input_changed_before_the_copy_is_refused(self):
+        from anonymizer import batch
+
+        (self.source / "a.pdf").write_bytes(self.text_pdf())
+        baseline, _ = self.process()
+        areas = self.draw(baseline, 1, (0.1, 0.1, 0.4, 0.2))
+        real, calls = batch.input_signature, []
+
+        def changing(source):
+            calls.append(source)
+            value = real(source)
+            return value if len(calls) == 1 else (value[0] + 1, value[1])
+
+        with mock.patch("anonymizer.batch.input_signature", changing):
+            catalog, results = self.process(areas)
+        outcome = [(target, error) for source, target, error in results if source is not None]
+        self.assertEqual(outcome, [(None, MANUAL_MISMATCH)])
+        self.assertIn("PLANETARIUM", self.markdown(catalog))
+
+    @unittest.skipUnless(TESSDATA, "chybí SPISREDAKT_TEST_TESSDATA")
+    def test_real_format_decides_the_exif_check_in_an_archive(self):
+        import struct
+
+        data, rgb, tiff, png, jpeg = self.images()
+        exif = b"Exif\0\0MM\0*\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0\x06\0\0\0\0\0\0"
+        turned = jpeg[:2] + b"\xff\xe1" + struct.pack(">H", len(exif) + 2) + exif + jpeg[2:]
+        with ZipFile(self.source / "spis.zip", "w") as archive:
+            archive.writestr("foto.bmp", turned)
+        baseline, _ = self.process()
+        areas = self.draw(baseline, 1, self.area_of(data, self.HIDDEN))
+        catalog, results = self.process(areas)
+        self.assertIn("manual_area_mismatch", self.markdown(catalog))
 
     def test_mismatch_message_is_a_fixed_text_with_a_code(self):
         from anonymizer.reasons import PREVIEW_MESSAGES

@@ -258,6 +258,10 @@ def _process_folders(input_root, output_root, tessdata, audit, selected, markdow
 def _release(sources, source_root, target_root, rules, tessdata, audit, markdown, copies, split, progress, summary,
              catalog=None, manual_areas=None):
     views = manual_areas.views() if manual_areas else {}
+    # Areas belong to the very files they were drawn on: every input with areas must still stand at the same
+    # place of the selection. Otherwise the numbers shifted and nothing of this processing is released.
+    if any(not 1 <= number <= len(sources) or sources[number - 1] != view.path for number, view in views.items()):
+        raise ValueError(MANUAL_MISMATCH)
     documents, _ = collect_documents(sources, rules, tessdata, progress, audit, catalog, views)
     if markdown:
         for item in _markdown(documents, rules, target_root, audit, split, summary):
@@ -278,6 +282,8 @@ def _release(sources, source_root, target_root, rules, tessdata, audit, markdown
                 if view.refused:
                     raise ValueError(MANUAL_MISMATCH)
                 view.begin("copy")
+                if input_signature(source) != view.signature:
+                    raise ValueError(MANUAL_MISMATCH)
             with tempfile.TemporaryDirectory(prefix="SpisRedakt-input-") as private:
                 staged, suffix = stage_input(source, private)
                 if staged is None:

@@ -1018,7 +1018,7 @@ def _tiff(ctx, path, manual=None):
     return _Result(pages, [], [])
 
 
-def _image(ctx, path, manual=None):
+def _image(ctx, path, manual=None, suffix=None):
     _need_ocr(ctx)
     data = path.read_bytes()
     pix = _pixmap(data)
@@ -1030,7 +1030,8 @@ def _image(ctx, path, manual=None):
     rectangles = manual.rects(1) if manual else ()
     if rectangles:
         manual.dimension(1, pix.width, pix.height)
-        if path.suffix.lower() != ".bmp" and not _upright(data, path.suffix.lower()[1:]):
+        # The real format decides (a JPEG named .bmp in an archive is a JPEG).
+        if suffix != ".bmp" and not _upright(data, (suffix or "")[1:]):
             raise _Skip("manual_area_mismatch")
         shadow = pdf.Pixmap(pix, 0)
     text = "\n\n".join(ocr_blocks(pix, ctx.tessdata))
@@ -1234,7 +1235,7 @@ def _extract(ctx, path, suffix, manual=None):
     if suffix in formats.SCANS:
         return _tiff(ctx, path, manual)
     if suffix in {".png", ".jpg", ".jpeg", ".bmp"}:
-        return _image(ctx, path, manual)
+        return _image(ctx, path, manual, suffix)
     if suffix == ".docx":
         return _docx(ctx, path)
     if suffix == ".xlsx":

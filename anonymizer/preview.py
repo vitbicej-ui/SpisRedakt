@@ -256,7 +256,7 @@ class Model:
         signature = self.catalog.inputs.get(locator[0], (None, None))[1]
         if signature is None:
             raise PreviewError("preview_input_changed")
-        return locator, signature
+        return locator, signature, self.catalog.inputs[locator[0]][0]
 
     def _copy(self, index):
         facts = self.catalog.documents[index]
@@ -513,7 +513,7 @@ class PreviewDialog(QDialog):
             return
         rectangle = normalize(x0, y0, x1, y1, width, height)
         if rectangle is not None:
-            self.areas.add(self.target[0], self.target[1], self.number.value(), rectangle)
+            self.areas.add(self.target[0], self.target[1], self.target[2], self.number.value(), rectangle)
         self.refresh_buttons()
 
     def remove_last(self):
