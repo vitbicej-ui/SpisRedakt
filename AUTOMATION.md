@@ -17,3 +17,5 @@ Plánovaný běh Codexu vyžaduje nastavení v GitHubu a API klíč. Tato verze 
 ## Orchestrace v Claude Code
 
 Další vývoj řídí agent `orchestrator` (`.claude/agents/orchestrator.md`, model Opus) podle `BACKLOG.md`. Implementaci deleguje na agenty `developer` (`.claude/agents/developer.md`, model Sonnet), kontroluje jejich práci, spouští testy a commituje do pracovní větve. Nic neslučuje a nevydává. Položky označené `[?]` čekají na rozhodnutí člověka. Ruční spuštění: `claude --agent orchestrator`.
+
+Pověření vlastníka z 24. 11. 2026: orchestrátor smí předat produktová a návrhová rozhodnutí u položek `[?]` agentu Opus (extra high). Rozhodnutí se zapisuje do `BACKLOG.md` a `PREDANI-VYVOJE.md`. Rozhodovatel nesmí schválit změnu workflow, oprávnění, novou závislost, snížení bezpečnosti, sloučení do main, štítek ani vydání.
