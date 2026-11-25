@@ -210,3 +210,7 @@ Schváleno s úpravou. Důvod: plochy jen přidávají začernění, ale musí p
 ## 17. Náhled v GUI (7a26bd3)
 
 `anonymizer/preview.py` (model bez widgetů + `PreviewDialog`), `process_folders(catalog=)`, `Document.locator`, hlášení `PREVIEW_MESSAGES` v `reasons.py`. Vše jen v paměti; testy `PreviewTests` v `tests/test_processing.py`. Ruční plochy (14b) mohou začít.
+
+## 18. Ruční vyznačení ploch (98a5a43)
+
+`anonymizer/manual.py` (`Areas`, `InputAreas`, `ItemAreas`), `process_folders(manual_areas=)`, `Page.collect_only`, `manual_area_mismatch` v `reasons.py`, ovládání v `PreviewDialog`/`Window`. Plochy jen v paměti; testy `ManualAreaTests`. Obrázek otočený podle EXIF se s plochami odmítá (nesoulad mezi `Pixmap` a vykreslením stránky). Bez ploch jsou výstupy bajtově shodné s předchozí verzí (ověřeno srovnáním).
